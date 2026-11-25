@@ -43,4 +43,12 @@ Copy this section for each decision. Use IDs such as `ADR-0001`.
 
 ## Decisions
 
-No project decisions have been recorded yet.
+### ADR-0001: Install the host from GitHub and enroll over USB
+
+- Date: 2026-11-25
+- Status: Accepted
+
+The installer copies the host runtime from one GitHub commit or a local checkout.
+A physical confirmation on the single attached device enrolls its ID on the host.
+The enrolled host sends approval cards and notifications over that USB connection.
+This works with the existing firmware and keeps setup independent of the firmware toolchain.

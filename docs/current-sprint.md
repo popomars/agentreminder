@@ -1,50 +1,13 @@
 # Current Sprint
 
-> Purpose: provide a small, current handoff surface for immediate execution. ChatGPT should turn agreed goals into testable scope and refresh status at discussion boundaries. Codex should read this before starting, update only work it actually performs, and never treat unchecked items as silently authorized. Archive or replace stale content at each sprint boundary.
+Deliver the host runtime, firmware sources, and first-run installer in the private
+GitHub repository. Users can download the installer with GitHub CLI or run it from
+a clone, then enroll an existing ESP32 over USB.
 
-## Sprint
+- USB firmware and button approvals passed prior physical testing.
+- Codex requires hook trust review after install.
+- Claude needs a valid login for a real session test.
+- dsh needs its bridge configured in the selected profile.
+- BLE and managed cloud approvals remain future work.
 
-- Name: [Short outcome-oriented name]
-- Window: YYYY-MM-DD to YYYY-MM-DD
-- Owner: [Person or team]
-- Status: Planned
-
-## Goal
-
-[One outcome that explains why this sprint matters.]
-
-## Committed scope
-
-- [ ] [Task with a clear completion condition]
-- [ ] [Task with a clear completion condition]
-
-## Acceptance criteria
-
-- [Observable product or engineering result]
-- [Required automated or manual verification]
-
-## Out of scope
-
-- [Related work intentionally deferred]
-
-## Work status
-
-| Item | State | Owner | Evidence or link |
-| --- | --- | --- | --- |
-| [Item] | Not started | [Owner] | [Issue/PR/test] |
-
-## Risks and blockers
-
-- None currently recorded.
-
-## Decisions needed
-
-- [Question, decision owner, and due date]
-
-## Session handoff
-
-- Last updated: YYYY-MM-DD
-- Completed: [What is demonstrably done]
-- Next action: [Single best next step]
-- Verification: [Checks run and results]
-- Notes: [Context the next session cannot infer from code]
+See [README](../README.md), [progress](progress.md), and [protocol](protocol.md).

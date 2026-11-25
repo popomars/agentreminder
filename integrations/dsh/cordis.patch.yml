@@ -1,0 +1,9 @@
+# 合并进你的 dsh profile 的 cordis.yml（或作为 patch 文件）。
+# 先运行:  node <repo>/host/agentreminder.js install dsh
+# 它会生成 ~/.agentreminder/dsh-hooks.json（Claude Code 方言的 hooks.json）。
+plugins:
+  - id: hooks-claude-code
+    name: '@deepseek-ai/dsh-hooks-claude-code'
+    config:
+      configPath: ~/.agentreminder/dsh-hooks.json   # 若不展开 ~，请写绝对路径 /Users/<你>/.agentreminder/dsh-hooks.json
+      defaultTimeoutMs: 120000

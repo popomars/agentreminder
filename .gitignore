@@ -45,3 +45,6 @@ target/
 *.tsbuildinfo
 
 # Keep project-specific additions below this line.
+.pio/
+.platformio/
+.runtime/

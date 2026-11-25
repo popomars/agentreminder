@@ -1,0 +1,11 @@
+{
+  "name": "agentreminder",
+  "owner": { "name": "mars" },
+  "plugins": [
+    {
+      "name": "agentreminder",
+      "source": "./",
+      "description": "ESP32-S3 approval & completion notifier for Claude Code"
+    }
+  ]
+}
