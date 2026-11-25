@@ -3,21 +3,18 @@
 #include "board_config.h"
 #include <lvgl.h>
 #include <vector>
-#include <cstring>
 #include <esp_heap_caps.h>
 
 static BoardDisplay lcd;
 static lv_display_t *disp;
-static constexpr int displayScale = 2;
-static constexpr int stripRows = 16;
-static uint16_t *scaledPixels;
+static constexpr int stripRows = 32;
 static std::vector<Item> approvals;   // oldest first
 static std::vector<Item> notes;       // newest first, max 20
 static lv_obj_t *content;
 static bool dirty = true;
 static uint32_t dimAt = 0;
 
-LV_FONT_DECLARE(agentreminder_cjk_26);
+LV_FONT_DECLARE(agentreminder_cjk_35);
 static lv_font_t fontCn;
 static bool fontReady = false;
 bool ui_font_ok() { return fontReady; }
@@ -26,32 +23,15 @@ bool ui_font_ok() { return fontReady; }
 /* ---------------- display / touch glue ---------------- */
 
 static void flush_cb(lv_display_t *d, const lv_area_t *a, uint8_t *px) {
-  const int width = lv_area_get_width(a);
-  const int height = lv_area_get_height(a);
-  const int outWidth = width * displayScale;
-  const auto stride = lv_draw_buf_width_to_stride(width, LV_COLOR_FORMAT_RGB565);
-  // Scaling by two also meets CO5300's even-coordinate and even-size requirement.
-  for (int top = 0; top < height; top += stripRows) {
-    const int rows = min(stripRows, height - top);
-    for (int row = 0; row < rows; ++row) {
-      const auto *src = reinterpret_cast<const uint16_t *>(px + (top + row) * stride);
-      auto *dst = scaledPixels + row * displayScale * outWidth;
-      for (int x = 0; x < width; ++x) {
-        dst[x * displayScale] = src[x];
-        dst[x * displayScale + 1] = src[x];
-      }
-      std::memcpy(dst + outWidth, dst, outWidth * sizeof(uint16_t));
-    }
-    lcd.draw(a->x1 * displayScale, (a->y1 + top) * displayScale,
-             outWidth, rows * displayScale, scaledPixels);
-  }
+  lcd.draw(a->x1, a->y1, lv_area_get_width(a), lv_area_get_height(a),
+           reinterpret_cast<uint16_t *>(px));
   lv_display_flush_ready(d);
 }
 
 static void touch_cb(lv_indev_t *, lv_indev_data_t *data) {
   uint16_t x, y;
   if (lcd.getTouch(&x, &y)) {
-    data->point.x = x / displayScale; data->point.y = y / displayScale; data->state = LV_INDEV_STATE_PRESSED;
+    data->point.x = x; data->point.y = y; data->state = LV_INDEV_STATE_PRESSED;
     lcd.setBrightness(200); dimAt = millis() + 60000;
   } else data->state = LV_INDEV_STATE_RELEASED;
 }
@@ -124,10 +104,10 @@ static lv_obj_t *button(lv_obj_t *parent, const char *txt, uint32_t color, const
   lv_obj_t *b = lv_button_create(parent);
   lv_obj_set_width(b, 0);
   lv_obj_set_flex_grow(b, 1);
-  lv_obj_set_height(b, 46);
+  lv_obj_set_height(b, 86);
   lv_obj_set_style_pad_all(b, 0, 0);
   lv_obj_set_style_bg_color(b, lv_color_hex(color), 0);
-  lv_obj_set_style_radius(b, 5, 0);
+  lv_obj_set_style_radius(b, 10, 0);
   lv_obj_add_event_cb(b, onDecision, LV_EVENT_CLICKED, (void *)decision);
   lv_obj_t *l = label(b, txt, lv_color_white(), false);
   lv_obj_center(l);
@@ -146,7 +126,7 @@ static void buildApproval() {
   lv_obj_set_width(summary, lv_pct(100));
   lv_obj_set_flex_grow(summary, 1);
   lv_obj_set_flex_flow(summary, LV_FLEX_FLOW_COLUMN);
-  lv_obj_set_style_pad_row(summary, 9, 0);
+  lv_obj_set_style_pad_row(summary, 16, 0);
   lv_obj_add_flag(summary, LV_OBJ_FLAG_SCROLLABLE);
   lv_obj_set_scroll_dir(summary, LV_DIR_VER);
 
@@ -157,7 +137,7 @@ static void buildApproval() {
   lv_obj_remove_style_all(btns);
   lv_obj_set_size(btns, lv_pct(100), LV_SIZE_CONTENT);
   lv_obj_set_flex_flow(btns, LV_FLEX_FLOW_ROW);
-  lv_obj_set_style_pad_column(btns, 4, 0);
+  lv_obj_set_style_pad_column(btns, 8, 0);
   button(btns, "拒绝", 0xC0392B, "deny");
   button(btns, "终端", 0x555555, "skip");
   button(btns, "同意", 0x27AE60, "allow");
@@ -202,10 +182,10 @@ void ui_init() {
   wake();
   lv_init();
   lv_tick_set_cb([]() -> uint32_t { return millis(); });
-  fontCn = agentreminder_cjk_26;
-  fontCn.fallback = &lv_font_montserrat_22;
-  fontCn.line_height = 34;
-  fontCn.base_line = 8;
+  fontCn = agentreminder_cjk_35;
+  fontCn.fallback = &lv_font_montserrat_28;
+  fontCn.line_height = 45;
+  fontCn.base_line = 10;
   fontReady = true;
   // Exercise the actual LVGL bitmap decoder, not just font character coverage.
   for (uint32_t cp : {0x41U, 0x5BA1U, 0x6279U, 0x62D2U, 0x7EDDU, 0x00B7U, 0x2192U}) {
@@ -220,15 +200,17 @@ void ui_init() {
     if (buf) lv_draw_buf_destroy(buf);
     if (!ok) { fontReady = false; break; }
   }
-  const int w = lcd.width() / displayScale, h = lcd.height() / displayScale;
+  const int w = lcd.width(), h = lcd.height();
   disp = lv_display_create(w, h);
-  const uint32_t stride = lv_draw_buf_width_to_stride(w, LV_COLOR_FORMAT_RGB565);
-  const size_t bufSz = stride * stripRows;
-  void *drawPixels = heap_caps_malloc(bufSz, MALLOC_CAP_INTERNAL);
-  scaledPixels = static_cast<uint16_t *>(heap_caps_malloc(
-    lcd.width() * stripRows * displayScale * sizeof(uint16_t), MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL));
-  if (!drawPixels || !scaledPixels) { Serial.println("LVGL buffer allocation failed"); abort(); }
+  const size_t bufSz = w * stripRows * sizeof(uint16_t);
+  void *drawPixels = heap_caps_malloc(bufSz, MALLOC_CAP_DMA | MALLOC_CAP_INTERNAL);
+  if (!drawPixels) { Serial.println("LVGL buffer allocation failed"); abort(); }
   lv_display_set_color_format(disp, LV_COLOR_FORMAT_RGB565);
+  // CO5300 requires even start coordinates and even pixel dimensions.
+  lv_display_add_event_cb(disp, [](lv_event_t *event) {
+    auto *area = (lv_area_t *)lv_event_get_param(event);
+    area->x1 &= ~1; area->y1 &= ~1; area->x2 |= 1; area->y2 |= 1;
+  }, LV_EVENT_INVALIDATE_AREA, nullptr);
   lv_display_set_buffers(disp, drawPixels, nullptr, bufSz, LV_DISPLAY_RENDER_MODE_PARTIAL);
   lv_display_set_flush_cb(disp, flush_cb);
   lv_indev_t *in = lv_indev_create();
@@ -238,14 +220,14 @@ void ui_init() {
   lv_obj_t *scr = lv_screen_active();
   lv_obj_set_style_bg_color(scr, lv_color_hex(0x111111), 0);
   lv_obj_set_flex_flow(scr, LV_FLEX_FLOW_COLUMN);
-  lv_obj_set_style_pad_all(scr, 10, 0);
+  lv_obj_set_style_pad_all(scr, 20, 0);
   lv_obj_set_style_pad_row(scr, 6, 0);
 
   content = lv_obj_create(scr);
   lv_obj_remove_style_all(content);
   lv_obj_set_width(content, lv_pct(100));
   lv_obj_set_flex_grow(content, 1);
-  lv_obj_set_style_pad_row(content, 4, 0);
+  lv_obj_set_style_pad_row(content, 8, 0);
   lv_obj_add_flag(content, LV_OBJ_FLAG_SCROLLABLE);
 
   rebuild();

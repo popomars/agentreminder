@@ -12,7 +12,7 @@
 
 #define LV_FONT_MONTSERRAT_14 1
 #define LV_FONT_MONTSERRAT_16 1
-#define LV_FONT_MONTSERRAT_22 1
+#define LV_FONT_MONTSERRAT_28 1
 #define LV_FONT_SIMSUN_16_CJK 0  /* use the complete basic CJK font in src/fonts */
 #define LV_FONT_DEFAULT &lv_font_montserrat_16
 

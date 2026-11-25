@@ -1,6 +1,6 @@
 # 微雪 ESP32-S3-Touch-AMOLED-2.16 固件
 
-这组文件来自 AgentReminder v0.2.4 固件构建，屏幕文字按两倍尺寸显示，约为 52 px。适用于
+这组文件来自 AgentReminder v0.2.5 固件构建，使用 35 px 中文字体。适用于
 CO5300、CST9220、16 MB Flash 和 8 MB PSRAM 的微雪 2.16 英寸 AMOLED 板。
 
 | 文件 | 写入地址 |
