@@ -49,19 +49,30 @@ if [[ -f "$source_dir/host/agentreminder.js" && "$source_dir" != "$install_dir" 
     cp "$source_dir/$file" "$stage/$file"
   done
 else
-  if ! command -v gh >/dev/null; then
-    echo '从私有仓库下载需要 GitHub CLI（gh），或先克隆仓库再运行安装脚本。' >&2
-    exit 1
+  github_token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
+  if [[ -z "$github_token" ]] && command -v gh >/dev/null; then
+    github_token="$(gh auth token 2>/dev/null || true)"
   fi
-  sha="$(gh api "repos/$repo/commits/$ref" --jq .sha)" || {
-    echo "请登录 GitHub CLI 并确认账号有 $repo 的读取权限。" >&2
+  github_get() {
+    local endpoint=$1 media=$2
+    if [[ -n "$github_token" ]]; then
+      printf 'Authorization: Bearer %s\n' "$github_token" | curl -fsS --retry 2 -H @- \
+        -H "Accept: $media" "https://api.github.com/repos/$repo/$endpoint"
+    else
+      curl -fsS --retry 2 -H "Accept: $media" "https://api.github.com/repos/$repo/$endpoint"
+    fi
+  }
+  sha="$(github_get "commits/$ref" application/vnd.github.sha)" || {
+    echo "请设置有仓库读取权限的 GH_TOKEN，或通过 gh auth login 登录后重试。" >&2
     exit 1
   }
   if [[ ! $sha =~ ^[a-f0-9]{40}$ ]]; then echo 'GitHub 没有返回有效的提交 SHA。' >&2; exit 1; fi
   for file in "${files[@]}"; do
     mkdir -p "$stage/$(dirname "$file")"
-    gh api -H 'Accept: application/vnd.github.raw+json' "repos/$repo/contents/$file?ref=$sha" > "$stage/$file"
+    github_get "contents/$file?ref=$sha" application/vnd.github.raw+json > "$stage/$file"
   done
+  unset github_token
+
 fi
 node --check "$stage/host/agentreminder.js"
 node --check "$stage/host/tools/hardware-check.js"
@@ -70,11 +81,8 @@ for file in "${files[@]}"; do
 done
 
 host="$install_dir/host/agentreminder.js"
-if "$pair" && ! node "$host" pair; then
-  echo '请处理上面的配对问题，再重新运行安装脚本。' >&2
-  exit 1
-fi
 for agent in "${agents[@]}"; do node "$host" install "$agent"; done
+if "$pair"; then node "$host" setup-usb; fi
 
 echo "AgentReminder 已安装到 $install_dir"
 printf '查看连接状态：node "%s" status\n' "$host"

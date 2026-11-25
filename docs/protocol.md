@@ -42,3 +42,16 @@ The host ignores any line that is not JSON, such as boot logs. A link only count
 The last device disconnecting cancels outstanding requests immediately. Heartbeats expire after 40 seconds without a device response. Approval IDs are UUIDs; reconnects replay only pending approvals with their remaining timeout. The device also expires stale approval cards locally if a cancellation cannot arrive.
 
 `conversation` is the current chat name; `reason` is the agent-provided approval message. `title` remains the tool name and `detail` the operation arguments. Session transcripts are inspected locally only for their title/first prompt, never forwarded wholesale.
+
+## SSH 远程 agent
+
+设备留在本机时，在远程主机用 `bash install.sh --no-pair` 安装 hooks，设置远程
+`~/.agentreminder/config.json` 中的 `httpPort` 为 `47331`。保持本机守护进程运行，
+从本机执行：
+
+```bash
+ssh -N -o ExitOnForwardFailure=yes -R 127.0.0.1:47331:127.0.0.1:47321 user@remote
+```
+
+远程运行 `node ~/.agentreminder/app/host/agentreminder.js status`，检查是否看到
+本机 USB 设备。SSH 转发步骤仍待真实远程 agent 验证。

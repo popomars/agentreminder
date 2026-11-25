@@ -22,7 +22,7 @@ const { StringDecoder } = require('string_decoder');
 const crypto = require('crypto');
 const { spawn, execFileSync } = require('child_process');
 
-const VERSION = '0.3.0';
+const VERSION = '0.3.1';
 const HOME_DIR = process.env.AGENTREMINDER_HOME || path.join(os.homedir(), '.agentreminder');
 const CONFIG_PATH = path.join(HOME_DIR, 'config.json');
 const LOG_PATH = path.join(HOME_DIR, 'daemon.log');
@@ -101,6 +101,7 @@ class Hub {
   connectedLinks() { return [...this.links].filter(l => l.ready); }
   readyLinks() {
     const paired = this.cfg.usb?.pairedDeviceId;
+    if (this.cfg.usb?.autoPair && !paired) return [];
     return this.connectedLinks().filter(l => !paired || (l.kind === 'usb' && l.info.id === paired));
   }
   broadcast(obj) { for (const l of this.readyLinks()) l.send(obj); }
@@ -286,10 +287,45 @@ function readBody(req) {
   });
 }
 
+function saveUsbConfig(usb) {
+  ensureHome();
+  const config = fs.existsSync(CONFIG_PATH) ? JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) : {};
+  config.usb = { ...config.usb, ...usb };
+  const tmp = `${CONFIG_PATH}.${crypto.randomUUID()}.tmp`;
+  try {
+    fs.writeFileSync(tmp, JSON.stringify(config, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
+    fs.renameSync(tmp, CONFIG_PATH);
+  } finally { fs.rmSync(tmp, { force: true }); }
+}
+
 function runDaemon() {
   ensureHome();
   const cfg = loadConfig();
   const hub = new Hub(cfg);
+
+  const prompted = new WeakSet();
+  async function pairUsb(response) {
+    const usb = hub.connectedLinks().filter(link => link.kind === 'usb' && link.info.id);
+    if (!usb.length) return { error: 'no-usb' };
+    if (usb.length !== 1) return { error: 'multiple-usb' };
+    const target = usb[0];
+    const deviceId = target.info.id;
+    if (cfg.usb.pairedDeviceId === deviceId) return { deviceId };
+    if (hub.pending.size) return { error: 'approval-pending' };
+    if (!response && prompted.has(target)) return { error: 'already-prompted' };
+    prompted.add(target);
+    const { id, promise } = hub.requestApproval({
+      agent: 'setup', conversation: 'AgentReminder', title: '配对这台电脑',
+      detail: `主机：${clip(os.hostname(), 100)}\n请按右键同意配对，或按左键拒绝。`,
+    }, 60000, target);
+    response?.on('close', () => { if (!response.writableEnded) hub.cancel(id, 'pairing-client-gone'); });
+    const result = await promise;
+    if (result.decision !== 'allow') return { error: result.decision || result.reason };
+    if (target.closed) return { error: 'device-disconnected' };
+    saveUsbConfig({ pairedDeviceId: deviceId, autoPair: false });
+    Object.assign(cfg.usb, { pairedDeviceId: deviceId, autoPair: false });
+    return { deviceId };
+  }
 
   const server = http.createServer(async (req, res) => {
     const reply = (code, obj) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)); };
@@ -298,37 +334,27 @@ function runDaemon() {
       if (req.method === 'GET' && req.url === '/status') {
         return reply(200, {
           version: VERSION, pid: process.pid, pairedDeviceId: cfg.usb.pairedDeviceId || null,
+          waitingForUsbPairing: !!(cfg.usb.autoPair && !cfg.usb.pairedDeviceId),
           devices: hub.readyLinks().map(l => ({ kind: l.kind, name: l.name, info: l.info })),
           pending: [...hub.pending.values()].map(p => ({ id: p.payload.id, agent: p.payload.agent, title: p.payload.title })),
         });
       }
       if (req.method !== 'POST') return reply(404, { error: 'not found' });
       const body = await readBody(req);
-      if (req.url === '/pair') {
-        const usb = hub.connectedLinks().filter(link => link.kind === 'usb' && link.info.id);
-        if (!usb.length) return reply(409, { error: 'no-usb' });
-        if (usb.length !== 1) return reply(409, { error: 'multiple-usb' });
-        const target = usb[0];
-        const deviceId = target.info.id;
-        if (cfg.usb.pairedDeviceId === deviceId) return reply(200, { deviceId });
-        if (hub.pending.size) return reply(409, { error: 'approval-pending' });
-        const { id, promise } = hub.requestApproval({
-          agent: 'setup', conversation: 'AgentReminder', title: '配对这台电脑',
-          detail: `主机：${clip(os.hostname(), 100)}\n请按右键同意配对，或按左键拒绝。`,
-        }, 60000, target);
-        res.on('close', () => { if (!res.writableEnded) hub.cancel(id, 'pairing-client-gone'); });
-        const result = await promise;
-        if (result.decision !== 'allow') return reply(409, { error: result.decision || result.reason });
-        if (target.closed) return reply(409, { error: 'device-disconnected' });
-        const config = fs.existsSync(CONFIG_PATH) ? JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) : {};
-        config.usb = { ...config.usb, pairedDeviceId: deviceId };
-        const tmp = `${CONFIG_PATH}.${crypto.randomUUID()}.tmp`;
-        try {
-          fs.writeFileSync(tmp, JSON.stringify(config, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
-          fs.renameSync(tmp, CONFIG_PATH);
-        } finally { fs.rmSync(tmp, { force: true }); }
-        cfg.usb.pairedDeviceId = deviceId;
-        return reply(200, { deviceId });
+      if (req.url === '/pair' || req.url === '/setup-usb') {
+        if (req.url === '/setup-usb') {
+          if (!cfg.usb.pairedDeviceId) {
+            saveUsbConfig({ enabled: true, autoPair: true });
+            if (!cfg.usb.enabled) {
+              cfg.usb.enabled = true;
+              startUsb(hub, cfg);
+            }
+            cfg.usb.autoPair = true;
+          }
+          return reply(200, { ok: true });
+        }
+        const result = await pairUsb(res);
+        return reply(result.deviceId ? 200 : 409, result);
       }
       if (req.url === '/approval') {
         if ([...hub.pending.values()].some(pending => pending.target)) {
@@ -354,6 +380,11 @@ function runDaemon() {
   });
   startUsb(hub, cfg);
   startWifi(hub, cfg);
+  setInterval(() => {
+    if (cfg.usb.autoPair && !cfg.usb.pairedDeviceId) {
+      pairUsb().catch(error => log('USB pairing failed', error.message));
+    }
+  }, 1000).unref();
   // Heartbeat: lets the device show link status and lets us notice dead links.
   setInterval(() => {
     for (const link of hub.connectedLinks()) {
@@ -407,7 +438,7 @@ async function ensureDaemon() {
   return false;
 }
 
-async function pairDevice() {
+async function preparePairing(autoSetup = false) {
   let status = await call('GET', '/status', null, 800).catch(() => null);
   if (status && status.version !== VERSION) {
     let localPid;
@@ -425,6 +456,20 @@ async function pairDevice() {
     if (status) throw new Error('旧版守护进程仍在运行，请停止后重试。');
   }
   if (!(await ensureDaemon())) throw new Error(`无法启动 AgentReminder。日志：${LOG_PATH}`);
+  if (autoSetup) {
+    const result = await call('POST', '/setup-usb', {}, 2000);
+    if (!result.ok) throw new Error(result.error || '无法启用自动配对。');
+  }
+}
+
+async function setupUsb() {
+  if (!loadConfig().usb.pairedDeviceId) saveUsbConfig({ enabled: true, autoPair: true });
+  await preparePairing(true);
+  console.log('插入已烧录的设备，出现配对卡片后按最右侧键同意。');
+}
+
+async function pairDevice() {
+  await preparePairing();
   console.log('请连接一台已烧录 AgentReminder 的 USB 设备。出现配对卡片后，按右键同意。');
   let result;
   for (let attempt = 0; attempt < 40; attempt++) {
@@ -636,6 +681,7 @@ async function main() {
     case 'hook': return runHook(rest);
     case 'daemon': return runDaemon();
     case 'pair': return pairDevice();
+    case 'setup-usb': return setupUsb();
     case 'start': { const ok = await ensureDaemon(); console.log(ok ? 'daemon running' : 'daemon failed, see ' + LOG_PATH); return; }
     case 'stop': try { await call('POST', '/shutdown', {}, 1000); console.log('stopped'); } catch (_) { console.log('not running'); } return;
     case 'status': try { console.log(JSON.stringify(await call('GET', '/status', null, 1000), null, 2)); } catch (_) { console.log('daemon not running'); } return;

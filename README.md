@@ -1,151 +1,58 @@
 # AgentReminder
 
-Shows approval requests and task-completion messages from Claude Code / Codex / DeepSeek Harness (dsh) on an ESP32-S3 touchscreen. Tap the screen to approve or deny. The device connects over **native USB CDC** by default. Wi-Fi TCP is optional and can run alongside USB when enabled. BLE is planned, not implemented.
+在微雪 ESP32-S3-Touch-AMOLED-2.16 上查看 agent 的审批和完成消息。审批卡片显示对话名称、操作和理由。按**左键拒绝**、**右键同意**，也可以点屏幕上的按钮。
 
-```
- Claude Code ─┐  PermissionRequest / Stop / Notification
- Codex ───────┼─ hook ─► host/agentreminder.js ──HTTP──► daemon (127.0.0.1:47321)
- dsh ─────────┘          (spawns the daemon on first use)  │
-                                                           ├─ USB CDC  /dev/cu.usbmodem*
-                                                           └─ Wi-Fi TCP agentreminder.local:47322
-                                                                      │
-                                                         ESP32-S3 touchscreen: 拒绝 / 终端 / 同意
-```
+## 安装并配对
 
-- **同意 / 拒绝 (approve / deny)**: the decision goes straight back to the agent.
-- **终端 (terminal)**, no device connected, or timeout (90 s by default): the hook prints nothing and the agent shows its own approval prompt as usual. The approval hook waits for the device decision, then falls back on timeout; completion notifications never return a blocking decision.
-- Hitting Esc / cancelling in the terminal: the card on the device disappears automatically.
-- **Conversation context**: cards show the conversation name, approval reason and tool arguments; the project folder is secondary. Codex titles come from its local session database, Claude from its session index/transcript, or an explicit hook title. Missing titles fall back to the session ID.
-- A response ended (`Stop`), or Claude is waiting for input: a notification card appears on the device. Tap it to dismiss.
+适用于 macOS 和 Linux。准备 Node.js 18 或更新版本，以及一台已刷入本项目固件的设备。设备可以在安装完成后再插入。
 
-Requirements: Node.js ≥ 18 (the host side has zero dependencies) and PlatformIO (for flashing the firmware). The configured board is **Waveshare ESP32-S3-Touch-AMOLED-2.16**, CO5300 QSPI AMOLED + CST9220 touch, 16 MB flash / 8 MB OPI PSRAM.
+仓库目前是私有的。用有仓库读取权限的 GitHub 令牌设置 `GH_TOKEN`。如果已用 GitHub CLI 登录，可以执行 `export GH_TOKEN="$(gh auth token)"`。然后用 curl 下载并运行：
 
-## Install from GitHub
-
-On macOS or Linux with Node.js 18 or later, connect a device already running
-AgentReminder firmware with a USB data cable. Sign in to GitHub CLI (`gh`) with
-an account that can read the private repository, then run:
-
-```sh
-gh api -H 'Accept: application/vnd.github.raw+json' \
-  'repos/popomars/agentreminder/contents/install.sh?ref=main' > agentreminder-install.sh \
-  && bash agentreminder-install.sh
+```bash
+printf 'Authorization: Bearer %s\n' "${GH_TOKEN:?请先设置 GH_TOKEN}" |
+  curl -fsS -H @- -H 'Accept: application/vnd.github.raw+json' \
+    'https://api.github.com/repos/popomars/agentreminder/contents/install.sh?ref=main' \
+    -o agentreminder-install.sh &&
+  bash agentreminder-install.sh
 ```
 
-The installer discovers local agents and copies only the host files into
-`~/.agentreminder/app`. Press the right button on the device when it asks to
-pair. The host saves that USB device ID and directs future cards to it. The
-same board can be paired on a different computer. This setup uses USB.
+也可以在已克隆的项目里运行 `bash install.sh`。默认检测本机的 agent，也可以指定 `bash install.sh --agent codex --agent claude`。安装目录为 `~/.agentreminder/app`。
 
-Use `--agent codex`, `--agent claude`, or `--agent dsh` to choose agents. Repeat
-the option to install more than one. For a checkout cloned via SSH, run
-`bash install.sh` inside it. Use `--no-pair` to install on a remote agent host.
-To pair or replace the device later, connect only the intended device and run
-`node ~/.agentreminder/app/host/agentreminder.js pair`.
+1. 用 USB 数据线接入一台已烧录的设备。屏幕出现 **「配对这台电脑」** 后按最右侧实体键。首次安装会在后台等待设备。以后插回同一台设备会自动连接。
+2. Codex 在 `/hooks` 中审核并信任 AgentReminder 的 hooks。Claude Code 开启新会话即可加载。安装脚本已写入这些 hook 配置。
+3. 查看连接状态及测试卡片：
 
-Codex requires hook review through `/hooks`. Claude Code loads the config in a
-new session. For dsh, complete the bridge setup below using the generated file
-and the patch under `~/.agentreminder/app/integrations/dsh`.
+   ```bash
+   node ~/.agentreminder/app/host/agentreminder.js status
+   node ~/.agentreminder/app/host/tools/hardware-check.js
+   ```
 
-## 1. Flash the firmware
+如果配对卡片超时或被拒绝，拔插后重试。换板子时只插入要配对的设备，再执行 `node ~/.agentreminder/app/host/agentreminder.js pair`。Linux 若检测不到设备，请检查当前用户是否有 `/dev/ttyACM*` 的串口访问权限。
 
-From the repository root:
+### dsh
 
-```sh
-python3 -m venv .venv
-.venv/bin/pip install platformio
-PLATFORMIO_CORE_DIR="$PWD/.platformio" .venv/bin/pio run -d firmware -t upload
-node host/agentreminder.js start
-node host/tools/hardware-check.js
+`bash install.sh --agent dsh` 会生成 dsh 的 hook 文件。dsh 还需要在你的 profile 中安装并配置 Claude Code hooks 桥接。将安装目录内 [Cordis 配置示例](integrations/dsh/cordis.patch.yml) 合并到对应 profile，并把 `configPath` 指向 `~/.agentreminder/dsh-hooks.json` 的绝对路径。桥接使用 `PreToolUse`，其同意行为还受 dsh 自身权限策略约束。
+
+## 刷机
+
+预编译固件保存在 [firmware/release/waveshare-amoled-2.16](firmware/release/waveshare-amoled-2.16)。它只适用于**微雪 ESP32-S3-Touch-AMOLED-2.16（16 MB Flash / 8 MB PSRAM）**。
+
+在 macOS 或 Linux 上克隆仓库，准备 Python 3，插上开发板，然后运行：
+
+```bash
+git clone git@github.com:popomars/agentreminder.git
+cd agentreminder
+bash flash.sh
 ```
 
-The hardware check asks for **拒绝** with the left physical key on a Codex card, then **同意** with the right physical key on a Claude card,
-then sends a completion card. These are real USB hook round trips; the displayed
-operation is never executed. Results go into `.runtime/hardware-check.json`.
-A complete 16 MB pre-flash backup, if taken, is kept under `.runtime/backups/`.
-For another board, replace `firmware/src/board_config.h`; do not reuse these pins.
+脚本校验仓库内的固件文件，首次运行时安装 esptool，自动选择唯一的 Espressif USB 串口，写入固件并重启。已有固件会被覆盖。接了多台设备时用 `bash flash.sh --port /dev/cu.usbmodem2101` 指定串口。只校验文件可运行 `bash flash.sh --check`。如果连不上刷机模式，按住 BOOT 键接入 USB，再重新运行脚本。
 
-Optional Wi-Fi: enable `wifi.enabled` in the config, restart the daemon, then run
-`node host/agentreminder.js wifi <SSID> <password>` with USB connected. Wi-Fi TCP
-currently has no pairing or encryption; USB is the validated default.
+## 拔掉 USB 后还能用吗？
 
-## 2. Install into the agents
+当前安装流程使用 USB。**BLE 尚未实现**，所以按上面的步骤安装配对后，拔掉 USB 就无法接收新消息或提交审批。仓库里另有实验性的 Wi-Fi TCP 传输，需要单独配置，也还没有在这块板上实测。
 
-**Claude Code** (plugin):
-```
-/plugin marketplace add /absolute/path/to/agentreminder
-/plugin install agentreminder@agentreminder
-```
-Uses the `PermissionRequest` (approve/deny), `Stop` (done) and `Notification` (waiting for input) hooks.
+## 开发和远程接入
 
-**Codex**:
-```
-node host/agentreminder.js install codex     # merges into ~/.codex/hooks.json (backs up to .bak)
-```
-Then run `/hooks` inside Codex to review and trust them. The repo also ships `.codex-plugin/plugin.json` + `hooks/codex.json`, so you can install it through Codex's plugin mechanism instead.
-
-**dsh (DeepSeek Harness)**: through the official Claude Code hook bridge
-```
-dsh plugin --profile <your profile> add @deepseek-ai/dsh-hooks-claude-code
-node host/agentreminder.js install dsh       # generates ~/.agentreminder/dsh-hooks.json
-```
-Then merge `integrations/dsh/cordis.patch.yml` into your profile config (point `configPath` at the absolute path of that file). Verify with `dsh web --dump-config | grep -i hook`.
-> Limitation: the bridge has no PermissionRequest, so it uses `PreToolUse` + a tool-name matcher (Bash/Write/Edit…). While the device is connected, every matching tool call goes to the device. The matcher includes lowercase dsh names as well as Claude-style names. `allow` is handed to the bridge and may still be subject to harness permission policy. The matcher can be changed via `dshMatcher` in `~/.agentreminder/config.json`. The long-term plan is a native Cordis plugin hooked into `tools/pre-execute`.
-
-## 3. Configuration `~/.agentreminder/config.json` (optional)
-
-```json
-{
-  "approvalTimeoutSec": 90,
-  "usb":  { "enabled": true },
-  "wifi": { "enabled": false, "hosts": ["agentreminder.local"], "port": 47322 },
-  "notify": { "stop": true, "idle": true }
-}
-```
-If mDNS is unreliable, put the device's IP in `hosts` (the screen's status bar shows the IP).
-
-## Common commands
-
-| Command | Purpose |
-|---|---|
-| `node host/agentreminder.js status` | Daemon status, connected devices, pending approvals |
-| `node host/agentreminder.js log` | Last 60 lines of the log |
-| `node host/agentreminder.js stop` | Stop the daemon (the next hook restarts it) |
-| `node host/tools/fake-device.js` | Simulate the device in a terminal (enable `wifi.enabled` and set `wifi.hosts` to `127.0.0.1`) |
-
-Protocol details: [docs/protocol.md](docs/protocol.md)
-
-## Validation and remote agents
-
-```sh
-node --test host/test/*.test.js
-```
-
-Tests include real hook subprocesses, the local HTTP daemon, a TCP device
-simulator, allow/deny/skip, notifications, cancellation, disconnection, malformed
-settings preservation, and UTF-8 split across transport reads. This does not
-replace the physical touchscreen check or an agent's own hook trust review.
-`Stop` means the agent ended a response, not proof that the overall task succeeded.
-
-For an agent on an SSH host, install the hooks **on that host** and forward a remote
-loopback port to the Mac daemon, for example from the Mac:
-
-```sh
-ssh -N -R 127.0.0.1:47331:127.0.0.1:47321 user@remote
-```
-
-Set `httpPort` to `47331` in the remote `~/.agentreminder/config.json`. Hook HTTP
-requests then reach the Mac, and device decisions return through the same tunnel.
-Do not expose the daemon on a public interface. This remote path has not yet been
-accepted on a real remote agent. Managed cloud products need their own supported
-hooks or event/approval APIs; installing this local plugin alone is insufficient.
-
-## Physical buttons and fonts
-
-Firmware v0.2 uses the two outer keys for the current approval, with 35ms debounce
-and no repeat into the next card while a key is held. The center power key retains
-its power function. The BOOT key retains its boot-loader role during startup.
-
-A generated Noto Sans SC font covers Basic CJK, kana, Latin-1, punctuation and
-arrows. Its open font license and regeneration steps are in `firmware/src/fonts/`.
-Emoji and supplementary-plane Han are outside this font's coverage.
+- 回归测试：`node --test host/test/*.test.js`。
+- 从源码构建：`pio run -d firmware`。预编译文件与偏移见 [固件说明](firmware/release/waveshare-amoled-2.16/README.md)。
+- 设备留在本机、agent 跑在 SSH 主机时，可在远端用 `bash install.sh --no-pair` 只装 hooks，然后用 SSH 反向转发把远端回环端口接到本机守护进程。具体地址见 [协议说明](docs/protocol.md)。

@@ -1,0 +1,16 @@
+# 微雪 ESP32-S3-Touch-AMOLED-2.16 固件
+
+这组文件来自已验收的 AgentReminder v0.2.0 固件构建。适用于
+CO5300、CST9220、16 MB Flash 和 8 MB PSRAM 的微雪 2.16 英寸 AMOLED 板。
+
+| 文件 | 写入地址 |
+| --- | --- |
+| bootloader.bin | `0x0000` |
+| partitions.bin | `0x8000` |
+| boot_app0.bin | `0xe000` |
+| firmware.bin | `0x10000` |
+
+从项目根目录运行 `bash flash.sh`。脚本逐个写入上述区域。
+更新预编译文件时，从同一 PlatformIO 构建复制前三个构建输出
+`bootloader.bin`、`partitions.bin`、`firmware.bin`，并取对应 Arduino
+框架的 `tools/partitions/boot_app0.bin`，最后重新生成 `SHA256SUMS`。

@@ -11,3 +11,7 @@ a clone, then enroll an existing ESP32 over USB.
 - BLE and managed cloud approvals remain future work.
 
 See [README](../README.md), [progress](progress.md), and [protocol](protocol.md).
+
+The host installer now writes hooks before USB enrollment. It supports an
+authenticated curl download and waits in the background for the first device.
+The checked-in firmware images and `flash.sh` cover the supported Waveshare board.
