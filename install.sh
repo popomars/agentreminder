@@ -42,7 +42,8 @@ mkdir -p "$install_dir/host/tools" "$install_dir/integrations/dsh"
 stage="$(mktemp -d "$install_dir/.install.XXXXXXXX")"
 trap 'rm -rf "$stage"' EXIT
 source_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-files=(host/agentreminder.js host/tools/hardware-check.js integrations/dsh/cordis.patch.yml)
+files=(host/agentreminder.js host/codex-approval-proxy.js host/codex-approval-cli host/open-codex.sh
+  host/tools/hardware-check.js integrations/dsh/cordis.patch.yml)
 if [[ -f "$source_dir/host/agentreminder.js" && "$source_dir" != "$install_dir" ]]; then
   for file in "${files[@]}"; do
     mkdir -p "$stage/$(dirname "$file")"
@@ -75,10 +76,12 @@ else
 
 fi
 node --check "$stage/host/agentreminder.js"
+node --check "$stage/host/codex-approval-proxy.js"
 node --check "$stage/host/tools/hardware-check.js"
 for file in "${files[@]}"; do
   mv "$stage/$file" "$install_dir/$file"
 done
+chmod 700 "$install_dir/host/codex-approval-cli" "$install_dir/host/open-codex.sh"
 
 host="$install_dir/host/agentreminder.js"
 for agent in "${agents[@]}"; do node "$host" install "$agent"; done

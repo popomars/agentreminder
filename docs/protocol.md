@@ -39,6 +39,13 @@ The host ignores any line that is not JSON, such as boot logs. A link only count
 
 `decision: null` (no device, timeout, or the user tapped "终端") makes the hook print nothing, so the agent falls back to its normal approval flow.
 
+The optional Codex desktop launcher mirrors native command and file approvals
+through the App Server stdio proxy. It sends the request to the desktop before
+waiting for the same decision on USB. A desktop response or
+`serverRequest/resolved` aborts the matching `/approval` call, which closes the
+device card. A device choice sends a single native `accept` or `decline` response.
+The AgentReminder permission hook exits early only in this launcher mode.
+
 The last device disconnecting cancels outstanding requests immediately. Heartbeats expire after 40 seconds without a device response. Approval IDs are UUIDs; reconnects replay only pending approvals with their remaining timeout. The device also expires stale approval cards locally if a cancellation cannot arrive.
 
 `conversation` is the current chat name; `reason` is the agent-provided approval message. `title` remains the tool name and `detail` the operation arguments. Session transcripts are inspected locally only for their title/first prompt, never forwarded wholesale.

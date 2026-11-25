@@ -15,3 +15,7 @@ See [README](../README.md), [progress](progress.md), and [protocol](protocol.md)
 The host installer now writes hooks before USB enrollment. It supports an
 authenticated curl download and waits in the background for the first device.
 The checked-in firmware images and `flash.sh` cover the supported Waveshare board.
+
+The macOS desktop launcher mirrors native Codex approvals on the USB device.
+Protocol and daemon integration tests pass. Visual confirmation in the actual
+desktop app requires reopening it with the launcher.

@@ -401,14 +401,14 @@ function runDaemon() {
 
 /* --------------------------- HTTP client ---------------------------- */
 
-function call(method, urlPath, body, timeoutMs) {
+function call(method, urlPath, body, timeoutMs, signal) {
   const cfg = loadConfig();
   return new Promise((resolve, reject) => {
     const data = body ? JSON.stringify(body) : null;
     const req = http.request({
       host: '127.0.0.1', port: cfg.httpPort, method, path: urlPath,
       headers: data ? { 'content-type': 'application/json', 'content-length': Buffer.byteLength(data) } : {},
-      timeout: timeoutMs,
+      timeout: timeoutMs, signal,
     }, (res) => {
       let b = ''; res.on('data', c => b += c);
       res.on('end', () => { try { resolve(JSON.parse(b)); } catch (e) { reject(e); } });
@@ -587,6 +587,10 @@ function arg(argv, name, def) {
 async function runHook(argv) {
   const agent = arg(argv, 'agent', 'agent');          // claude | codex | dsh
   const event = arg(argv, 'event', 'permission');     // permission | pretool | stop | notification
+  if (agent === 'codex' && event === 'permission' && process.env.AGENTREMINDER_CODEX_DUAL_APPROVAL === '1') {
+    // The app-server proxy mirrors the native request after Codex creates it.
+    return;
+  }
   const input = await readStdin();
   const cfg = loadConfig();
   const project = clip(path.basename(input.cwd || process.cwd()), 80);
@@ -724,4 +728,4 @@ if (require.main === module) {
   main().catch(e => { console.error(e.message); process.exitCode = 1; });
 }
 
-module.exports = { Hub, Link, mergeHooks, describeTool, describeSession, transcriptTitle, shellQuote };
+module.exports = { Hub, Link, mergeHooks, describeTool, describeSession, transcriptTitle, shellQuote, call, ensureDaemon, loadConfig };

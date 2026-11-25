@@ -52,3 +52,12 @@ The installer copies the host runtime from one GitHub commit or a local checkout
 A physical confirmation on the single attached device enrolls its ID on the host.
 The enrolled host sends approval cards and notifications over that USB connection.
 This works with the existing firmware and keeps setup independent of the firmware toolchain.
+
+### ADR-0002: Mirror native Codex approvals through the App Server
+
+- Date: 2026-11-25
+- Status: Accepted
+
+Codex's desktop launcher mirrors the App Server's native command and file
+requests over USB. The first decision wins. The pre-prompt AgentReminder
+permission hook yields inside this launch mode so the native prompt can open.

@@ -6,6 +6,7 @@ const http = require('node:http');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const readline = require('node:readline');
 const { spawn } = require('node:child_process');
 const host = path.resolve(__dirname, '../agentreminder.js');
 const sleep = ms => new Promise(r => setTimeout(r, ms));
@@ -32,7 +33,7 @@ test('real hook processes → daemon → TCP device → agent-compatible JSON', 
       while ((i = buf.indexOf('\n')) >= 0) {
         const m = JSON.parse(buf.slice(0, i)); buf = buf.slice(i + 1); received.push(m);
         if (m.t === 'hello') sock.write('{"t":"hello","app":"agentreminder","id":"flow-test"}\n');
-        if (m.t === 'approval') sock.write(JSON.stringify({ t: 'decision', id: m.id, decision }) + '\n');
+        if (m.t === 'approval' && decision) sock.write(JSON.stringify({ t: 'decision', id: m.id, decision }) + '\n');
       }
     });
   });
@@ -58,4 +59,45 @@ test('real hook processes → daemon → TCP device → agent-compatible JSON', 
     assert.equal(await hook(agent, 'stop', { last_assistant_message: '完成', cwd: '/tmp/项目' }), '');
     assert.equal(received.filter(m => m.t === 'notify').at(-1).detail, '完成');
   }
+
+  // A simulated App Server gives the actual stdio wrapper and device daemon a shared request.
+  const appServer = path.join(home, 'app-server-fixture');
+  fs.writeFileSync(appServer, `#!${process.execPath}
+const readline = require('node:readline');
+const send = message => console.log(JSON.stringify(message));
+if (process.env.AGENTREMINDER_CODEX_DUAL_APPROVAL !== '1') process.exit(3);
+readline.createInterface({ input: process.stdin }).on('line', line => {
+  const message = JSON.parse(line);
+  if (message.method === 'fixture/trigger') {
+    send({ id: message.params.requestId, method: 'item/commandExecution/requestApproval', params: { reason: '双端测试' } });
+  } else if (message.result) {
+    send({ method: 'serverRequest/resolved', params: { requestId: message.id } });
+    send({ method: 'fixture/received', params: message.result });
+  }
+});`, { mode: 0o700 });
+  const proxy = spawn(process.execPath, [path.resolve(__dirname, '../codex-approval-proxy.js'), 'app-server'], {
+    env: { ...env, AGENTREMINDER_CODEX_REAL_CLI: appServer },
+  });
+  t.after(() => proxy.kill());
+  const desktop = [];
+  readline.createInterface({ input: proxy.stdout }).on('line', line => desktop.push(JSON.parse(line)));
+  const send = message => proxy.stdin.write(JSON.stringify(message) + '\n');
+  async function until(check) {
+    for (let i = 0; i < 150 && !check(); i++) await sleep(20);
+    assert(check());
+  }
+
+  decision = null;
+  const before = received.length;
+  send({ method: 'fixture/trigger', params: { requestId: 100 } });
+  await until(() => desktop.some(m => m.id === 100) && received.slice(before).some(m => m.t === 'approval'));
+  const card = received.slice(before).find(m => m.t === 'approval');
+  send({ id: 100, result: { decision: 'decline' } });
+  await until(() => received.some(m => m.t === 'cancel' && m.id === card.id));
+
+  decision = 'allow';
+  send({ method: 'fixture/trigger', params: { requestId: 101 } });
+  await until(() => desktop.some(m => m.method === 'serverRequest/resolved' && m.params.requestId === 101));
+  assert(desktop.some(m => m.method === 'fixture/received' && m.params.decision === 'accept'));
+  proxy.stdin.end();
 });

@@ -29,6 +29,18 @@ printf 'Authorization: Bearer %s\n' "${GH_TOKEN:?请先设置 GH_TOKEN}" |
 
 如果配对卡片超时或被拒绝，拔插后重试。换板子时只插入要配对的设备，再执行 `node ~/.agentreminder/app/host/agentreminder.js pair`。Linux 若检测不到设备，请检查当前用户是否有 `/dev/ttyACM*` 的串口访问权限。
 
+### Codex 桌面端和设备同时审批
+
+在 macOS 上，保存工作并完全退出 ChatGPT 桌面应用，然后用下面的命令重新打开。
+
+```bash
+bash ~/.agentreminder/app/host/open-codex.sh
+```
+
+如果 hook 使用的是仓库中的脚本，可从仓库根目录运行 `bash host/open-codex.sh`。如果 hook 使用的是以前安装的副本，先重新运行 `bash install.sh --agent codex` 更新它。
+
+这个启动器会转接 Codex 的原生命令和文件修改审批。两端看到同一个请求，先处理的一端生效。设备按「终端」、断线或超时时，可继续在 Codex 中处理。其他审批类型由 Codex 原生界面处理。平时从 Dock 正常启动，会回到原来的 hook 审批模式。
+
 ### dsh
 
 `bash install.sh --agent dsh` 会生成 dsh 的 hook 文件。dsh 还需要在你的 profile 中安装并配置 Claude Code hooks 桥接。将安装目录内 [Cordis 配置示例](integrations/dsh/cordis.patch.yml) 合并到对应 profile，并把 `configPath` 指向 `~/.agentreminder/dsh-hooks.json` 的绝对路径。桥接使用 `PreToolUse`，其同意行为还受 dsh 自身权限策略约束。
