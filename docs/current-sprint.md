@@ -1,21 +1,10 @@
 # Current Sprint
 
-Deliver the host runtime, firmware sources, and first-run installer in the private
-GitHub repository. Users can download the installer with GitHub CLI or run it from
-a clone, then enroll an existing ESP32 over USB.
+- Ship a host and firmware installer that uses the same Git commit for both.
+- Verify the five-minute approval deadline, physical device queue and source metadata.
+- Keep one local daemon. Use a CoreBluetooth helper only for a paired macOS device and the Codex bridge only for the desktop session.
+- Provide Chinese and English setup and removal instructions.
 
-- USB firmware and button approvals passed prior physical testing.
-- Codex requires hook trust review after install.
-- Claude needs a valid login for a real session test.
-- dsh needs its bridge configured in the selected profile.
-- BLE and managed cloud approvals remain future work.
+USB and macOS Bluetooth have passed a physical device round trip. Codex desktop command approvals have also been exercised. A logged-in Claude session, a real dsh profile, Linux hardware, and managed cloud approvals remain outside the verified matrix.
 
-See [README](../README.md), [progress](progress.md), and [protocol](protocol.md).
-
-The host installer now writes hooks before USB enrollment. It supports an
-authenticated curl download and waits in the background for the first device.
-The checked-in firmware images and `flash.sh` cover the supported Waveshare board.
-
-The macOS desktop launcher mirrors native Codex approvals on the USB device.
-Protocol and daemon integration tests pass. Visual confirmation in the actual
-desktop app requires reopening it with the launcher.
+See [Chinese setup](../README.md), [English setup](../README.en.md), [protocol](protocol.md), and [progress](progress.md).

@@ -61,3 +61,15 @@ This works with the existing firmware and keeps setup independent of the firmwar
 Codex's desktop launcher mirrors the App Server's native command and file
 requests over USB. The first decision wins. The pre-prompt AgentReminder
 permission hook yields inside this launch mode so the native prompt can open.
+
+### ADR-0003: Version the firmware and host together
+
+- Date: 2026-11-25
+- Status: Accepted
+
+The host installer can flash the bundled Waveshare firmware when explicitly
+invoked with `--flash`. A remote install resolves a Git commit first and takes
+both its runtime and firmware from that commit. Firmware integrity is verified
+before flashing. The HTTP listener owns the USB and Bluetooth transports so
+concurrent hook startup cannot attach duplicate device clients. Uninstall keeps
+pairing data and removes only the installer-managed files and hooks.

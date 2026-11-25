@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>
+  <string>com.agentreminder.bluetooth</string>
+  <key>CFBundleName</key>
+  <string>AgentReminder Bluetooth</string>
+  <key>NSBluetoothAlwaysUsageDescription</key>
+  <string>AgentReminder 通过蓝牙向你配对的 ESP32 发送审批和任务完成提醒。</string>
+</dict>
+</plist>

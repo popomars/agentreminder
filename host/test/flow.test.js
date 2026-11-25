@@ -41,10 +41,13 @@ test('real hook processes → daemon → TCP device → agent-compatible JSON', 
   const temp = net.createServer(); const httpPort = await listen(temp); await new Promise(r => temp.close(r));
   fs.writeFileSync(path.join(home, 'config.json'), JSON.stringify({ httpPort, usb: { enabled: false }, wifi: { enabled: true, hosts: ['127.0.0.1'], port: wifiPort } }));
   const env = { ...process.env, AGENTREMINDER_HOME: home };
+  delete env.AGENTREMINDER_CODEX_DUAL_APPROVAL;
   const daemon = spawn(process.execPath, [host, 'daemon'], { env, stdio: 'ignore' });
   t.after(() => { daemon.kill(); for (const sock of sockets) sock.destroy(); device.close(); fs.rmSync(home, { recursive: true, force: true }); });
   for (let i = 0; i < 100 && !received.some(m => m.t === 'hello'); i++) await sleep(30);
   assert(received.some(m => m.t === 'hello')); await sleep(30);
+  const relayHost = received.find(m => m.t === 'hello').host;
+  assert(relayHost);
   const hook = (agent, event, input) => childResult(spawn(process.execPath, [host, 'hook', '--agent', agent, '--event', event], { env }), input);
   for (const agent of ['claude', 'codex', 'dsh']) {
     for (decision of ['allow', 'deny', 'skip']) {
@@ -55,9 +58,13 @@ test('real hook processes → daemon → TCP device → agent-compatible JSON', 
       assert.equal(agent === 'dsh' ? result.permissionDecision : result.decision.behavior, decision);
       assert.equal(received.filter(m => m.t === 'approval').at(-1).detail, 'echo test审批');
       assert.equal(received.filter(m => m.t === 'approval').at(-1).conversation, '实际对话名称：设备验证');
+      assert.equal(received.filter(m => m.t === 'approval').at(-1).project, '项目');
+      assert.equal(received.filter(m => m.t === 'approval').at(-1).host, relayHost);
     }
     assert.equal(await hook(agent, 'stop', { last_assistant_message: '完成', cwd: '/tmp/项目' }), '');
     assert.equal(received.filter(m => m.t === 'notify').at(-1).detail, '完成');
+    assert.equal(received.filter(m => m.t === 'notify').at(-1).project, '项目');
+    assert.equal(received.filter(m => m.t === 'notify').at(-1).host, relayHost);
   }
 
   // A simulated App Server gives the actual stdio wrapper and device daemon a shared request.

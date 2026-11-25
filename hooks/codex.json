@@ -1,7 +1,7 @@
 {
   "hooks": {
     "PermissionRequest": [
-      { "hooks": [ { "type": "command", "command": "node \"$PLUGIN_ROOT/host/agentreminder.js\" hook --agent codex --event permission", "timeout": 120, "statusMessage": "等待 AgentReminder 设备审批" } ] }
+      { "hooks": [ { "type": "command", "command": "node \"$PLUGIN_ROOT/host/agentreminder.js\" hook --agent codex --event permission", "timeout": 330, "statusMessage": "等待 AgentReminder 设备审批" } ] }
     ],
     "Stop": [
       { "hooks": [ { "type": "command", "command": "node \"$PLUGIN_ROOT/host/agentreminder.js\" hook --agent codex --event stop", "timeout": 10 } ] }

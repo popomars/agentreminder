@@ -6,4 +6,4 @@ plugins:
     name: '@deepseek-ai/dsh-hooks-claude-code'
     config:
       configPath: ~/.agentreminder/dsh-hooks.json   # 若不展开 ~，请写绝对路径 /Users/<你>/.agentreminder/dsh-hooks.json
-      defaultTimeoutMs: 120000
+      defaultTimeoutMs: 330000

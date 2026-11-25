@@ -5,8 +5,9 @@
  *   - the background daemon that talks to the ESP32-S3           (`daemon`)
  *   - a small CLI                                                 (`status`, `test`, `wifi`, `install` ...)
  *
- * Device transports (both optional, used at the same time):
+ * Device transports:
  *   USB  : /dev/cu.usbmodem* (macOS) or /dev/ttyACM* (Linux), newline-delimited JSON
+ *   BLE  : authenticated macOS connection to a board enrolled over USB
  *   Wi-Fi: TCP client to <host>:47322 (default agentreminder.local), newline-delimited JSON
  * See docs/protocol.md.
  */
@@ -21,16 +22,18 @@ const tty = require('tty');
 const { StringDecoder } = require('string_decoder');
 const crypto = require('crypto');
 const { spawn, execFileSync } = require('child_process');
+const bluetooth = require('./bluetooth');
 
-const VERSION = '0.3.1';
+const VERSION = '0.4.2';
 const HOME_DIR = process.env.AGENTREMINDER_HOME || path.join(os.homedir(), '.agentreminder');
 const CONFIG_PATH = path.join(HOME_DIR, 'config.json');
 const LOG_PATH = path.join(HOME_DIR, 'daemon.log');
 
 const DEFAULT_CONFIG = {
   httpPort: 47321,              // daemon <-> hook (127.0.0.1 only)
-  approvalTimeoutSec: 90,       // after this the agent falls back to its own prompt
+  approvalTimeoutSec: 300,      // after this the agent falls back to its own prompt
   usb: { enabled: true, patterns: ['^cu\\.usbmodem', '^ttyACM'] },
+  bluetooth: { enabled: true },
   wifi: { enabled: false, hosts: ['agentreminder.local'], port: 47322 },
   notify: { stop: true, idle: true },
 };
@@ -41,6 +44,7 @@ function loadConfig() {
   return {
     ...DEFAULT_CONFIG, ...user,
     usb: { ...DEFAULT_CONFIG.usb, ...(user.usb || {}) },
+    bluetooth: { ...DEFAULT_CONFIG.bluetooth, ...(user.bluetooth || {}) },
     wifi: { ...DEFAULT_CONFIG.wifi, ...(user.wifi || {}) },
     notify: { ...DEFAULT_CONFIG.notify, ...(user.notify || {}) },
   };
@@ -55,6 +59,15 @@ function log(...args) {
 }
 
 const clip = (s, n) => { s = String(s ?? ''); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
+const hostName = (() => {
+  if (process.platform === 'darwin') {
+    try {
+      const name = execFileSync('/usr/sbin/scutil', ['--get', 'LocalHostName'], { encoding: 'utf8', timeout: 300, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+      if (name) return clip(name, 100);
+    } catch (_) { /* use the system hostname */ }
+  }
+  return clip(os.hostname(), 100);
+})();
 
 /* ------------------------------------------------------------------ */
 /* Device link: one NDJSON duplex (serial port or TCP socket)          */
@@ -102,14 +115,16 @@ class Hub {
   readyLinks() {
     const paired = this.cfg.usb?.pairedDeviceId;
     if (this.cfg.usb?.autoPair && !paired) return [];
-    return this.connectedLinks().filter(l => !paired || (l.kind === 'usb' && l.info.id === paired));
+    return this.connectedLinks().filter(l => l.kind === 'ble'
+      ? !!paired && l.pairedDeviceId === paired && l.info.id === paired
+      : !paired || (l.kind === 'usb' && l.info.id === paired));
   }
   broadcast(obj) { for (const l of this.readyLinks()) l.send(obj); }
 
   add(link) {
     this.links.add(link);
     log('link open', link.kind, link.name);
-    const hello = { t: 'hello', host: os.hostname(), v: VERSION };
+    const hello = { t: 'hello', host: hostName, v: VERSION };
     link.helloRetry = setInterval(() => link.send(hello), 500);
     // A port that never answers hello is not our device.
     link.helloTimer = setTimeout(() => { if (!link.ready) { log('no hello from', link.name); link.close(); } }, 6000);
@@ -130,6 +145,8 @@ class Hub {
     switch (msg.t) {
       case 'hello':
         if (msg.app !== 'agentreminder') return;
+        if (link.kind === 'ble' && msg.id !== link.pairedDeviceId) { link.close(); return; }
+        if (link.ready) return;
         link.ready = true; link.info = msg; clearTimeout(link.helloTimer);
         clearInterval(link.helloRetry);
         log('device ready', link.kind, link.name, msg);
@@ -143,7 +160,7 @@ class Hub {
         if (link.ready && this.pending.has(msg.id) &&
             (this.pending.get(msg.id).target ? this.pending.get(msg.id).target === link : this.readyLinks().includes(link)) &&
             ['allow', 'deny', 'skip'].includes(msg.decision))
-          this.resolve(msg.id, msg.decision, `${link.kind}:${link.name}`);
+          this.resolve(msg.id, msg.decision, `${link.kind}:${link.name}`, msg.ble_paired === true);
         break;
       case 'pong': case 'ack': break;
       case 'log': log('device:', msg.msg); break;
@@ -152,21 +169,25 @@ class Hub {
   }
 
   /** Ask connected devices. promise -> { decision: 'allow'|'deny'|null } (null = let the agent ask normally). */
-  requestApproval(info, timeoutMs, target = null) {
+  requestApproval(info, timeoutMs, target = null, enrollmentKey = null) {
     const id = crypto.randomUUID();
     if (target ? !target.ready || target.closed : this.readyLinks().length === 0) {
       return { id, promise: Promise.resolve({ decision: null, reason: 'no-device' }) };
     }
     const promise = new Promise(resolve => {
-      const payload = { ...info, t: 'approval', id, ts: Date.now(), timeout: Math.round(timeoutMs / 1000) };
+      // An already-running desktop bridge may still send file approvals without a project.
+      const project = info.project || (!info.host && info.agent === 'codex' ? clip(path.basename(codexThread(info.sessionId).cwd || ''), 80) : '');
+      const payload = { ...info, host: info.host || hostName, project, t: 'approval', id, ts: Date.now(), timeout: Math.round(timeoutMs / 1000) };
       const timer = setTimeout(() => this.resolve(id, null, 'timeout'), timeoutMs);
       this.pending.set(id, { payload, resolve, timer, target, deadline: Date.now() + timeoutMs });
-      if (target) target.send(payload); else this.broadcast(payload);
+      if (enrollmentKey) target.send({ ...payload, t: 'ble-pair', key: enrollmentKey });
+      else if (target) target.send(payload);
+      else this.broadcast(payload);
       log('approval ->', id, info.agent, info.title);
     });
     return { id, promise };
   }
-  resolve(id, decision, by) {
+  resolve(id, decision, by, bluetoothPaired = false) {
     const p = this.pending.get(id);
     if (!p) return;
     this.pending.delete(id);
@@ -175,7 +196,7 @@ class Hub {
     const result = { t: 'resolved', id, decision: d || 'skip', by };
     if (p.target) p.target.send(result); else this.broadcast(result);
     log('approval <-', id, d || 'skip', by);
-    p.resolve({ decision: d, reason: by });
+    p.resolve({ decision: d, reason: by, ...(p.target && bluetoothPaired ? { bluetoothPaired } : {}) });
   }
   cancel(id, why) {
     const p = this.pending.get(id);
@@ -187,7 +208,7 @@ class Hub {
     p.resolve({ decision: null, reason: why });
   }
   notify(info) {
-    const payload = { ...info, t: 'notify', id: crypto.randomUUID(), ts: Date.now() };
+    const payload = { ...info, host: info.host || hostName, t: 'notify', id: crypto.randomUUID(), ts: Date.now() };
     this.broadcast(payload);
     log('notify ->', info.agent, info.kind, info.title);
     return this.readyLinks().length;
@@ -291,10 +312,11 @@ function readBody(req) {
   });
 }
 
-function saveUsbConfig(usb) {
+function savePairingConfig(usb, bluetoothKey) {
   ensureHome();
   const config = fs.existsSync(CONFIG_PATH) ? JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) : {};
   config.usb = { ...config.usb, ...usb };
+  if (bluetoothKey !== undefined) config.bluetooth = { ...config.bluetooth, key: bluetoothKey };
   const tmp = `${CONFIG_PATH}.${crypto.randomUUID()}.tmp`;
   try {
     fs.writeFileSync(tmp, JSON.stringify(config, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
@@ -306,6 +328,7 @@ function runDaemon() {
   ensureHome();
   const cfg = loadConfig();
   const hub = new Hub(cfg);
+  let ble;
 
   const prompted = new WeakSet();
   async function pairUsb(response) {
@@ -314,21 +337,29 @@ function runDaemon() {
     if (usb.length !== 1) return { error: 'multiple-usb' };
     const target = usb[0];
     const deviceId = target.info.id;
-    if (cfg.usb.pairedDeviceId === deviceId) return { deviceId };
+    const canPairBluetooth = cfg.bluetooth.enabled && bluetooth.available() && target.info.ble === 1 && /^[0-9A-Fa-f]{12}$/.test(deviceId);
+    if (cfg.usb.pairedDeviceId === deviceId && (!canPairBluetooth || (!response && cfg.bluetooth.key && target.info.ble_paired))) {
+      return { deviceId, bluetoothPaired: !!cfg.bluetooth.key };
+    }
     if (hub.pending.size) return { error: 'approval-pending' };
     if (!response && prompted.has(target)) return { error: 'already-prompted' };
     prompted.add(target);
+    const key = canPairBluetooth ? crypto.randomBytes(32).toString('hex') : null;
     const { id, promise } = hub.requestApproval({
-      agent: 'setup', conversation: clip(os.hostname(), 100), title: '配对这台电脑',
-      detail: `主机：${clip(os.hostname(), 100)}\n请按右键同意配对，或按左键拒绝。`,
-    }, 60000, target);
+      agent: 'setup', conversation: hostName, title: '配对这台电脑',
+      detail: `主机：${hostName}\n请按右键同意配对，或按左键拒绝。`,
+    }, 60000, target, key);
     response?.on('close', () => { if (!response.writableEnded) hub.cancel(id, 'pairing-client-gone'); });
     const result = await promise;
     if (result.decision !== 'allow') return { error: result.decision || result.reason };
     if (target.closed) return { error: 'device-disconnected' };
-    saveUsbConfig({ pairedDeviceId: deviceId, autoPair: false });
+    if (key && !result.bluetoothPaired) return { error: 'bluetooth-pairing-not-saved' };
+    savePairingConfig({ pairedDeviceId: deviceId, autoPair: false }, key);
     Object.assign(cfg.usb, { pairedDeviceId: deviceId, autoPair: false });
-    return { deviceId };
+    cfg.bluetooth.key = key;
+    if (key) target.info.ble_paired = true;
+    ble.tick();
+    return { deviceId, bluetoothPaired: !!key };
   }
 
   const server = http.createServer(async (req, res) => {
@@ -339,6 +370,7 @@ function runDaemon() {
         return reply(200, {
           version: VERSION, pid: process.pid, pairedDeviceId: cfg.usb.pairedDeviceId || null,
           waitingForUsbPairing: !!(cfg.usb.autoPair && !cfg.usb.pairedDeviceId),
+          bluetooth: ble.status(),
           devices: hub.readyLinks().map(l => ({ kind: l.kind, name: l.name, info: l.info })),
           pending: [...hub.pending.values()].map(p => ({ id: p.payload.id, agent: p.payload.agent, title: p.payload.title })),
         });
@@ -348,7 +380,7 @@ function runDaemon() {
       if (req.url === '/pair' || req.url === '/setup-usb') {
         if (req.url === '/setup-usb') {
           if (!cfg.usb.pairedDeviceId) {
-            saveUsbConfig({ enabled: true, autoPair: true });
+            savePairingConfig({ enabled: true, autoPair: true });
             if (!cfg.usb.enabled) {
               cfg.usb.enabled = true;
               startUsb(hub, cfg);
@@ -371,7 +403,12 @@ function runDaemon() {
         return reply(200, await promise);
       }
       if (req.url === '/notify') return reply(200, { delivered: hub.notify(body.info || {}) });
-      if (req.url === '/raw') { hub.broadcast(body); return reply(200, { delivered: hub.readyLinks().length }); }
+      if (req.url === '/raw') {
+        if (body.t === 'ble-pair') return reply(409, { error: 'use USB pairing' });
+        const links = hub.readyLinks().filter(link => body.t !== 'wifi' || link.kind === 'usb');
+        for (const link of links) link.send(body);
+        return reply(200, { delivered: links.length });
+      }
       if (req.url === '/shutdown') { reply(200, { ok: true }); log('shutdown'); setTimeout(() => process.exit(0), 100); return; }
       return reply(404, { error: 'not found' });
     } catch (e) { log('http error', e.stack || e.message); reply(500, { error: e.message }); }
@@ -381,21 +418,25 @@ function runDaemon() {
   server.listen(cfg.httpPort, '127.0.0.1', () => {
     log(`daemon ${VERSION} listening on 127.0.0.1:${cfg.httpPort} pid=${process.pid}`);
     try { fs.writeFileSync(path.join(HOME_DIR, 'daemon.pid'), String(process.pid)); } catch (_) { /* ignore */ }
+    // Only the process that owns the HTTP port may open the device transports.
+    ble = bluetooth.startBluetooth(hub, Link, log);
+    startUsb(hub, cfg);
+    startWifi(hub, cfg);
+    setInterval(() => {
+      const upgrade = cfg.usb.pairedDeviceId && cfg.bluetooth.enabled && bluetooth.available() &&
+        hub.connectedLinks().some(link => link.kind === 'usb' && link.info.id === cfg.usb.pairedDeviceId && link.info.ble === 1 &&
+          (!cfg.bluetooth.key || !link.info.ble_paired));
+      if ((cfg.usb.autoPair && !cfg.usb.pairedDeviceId) || upgrade) {
+        pairUsb().catch(error => log('USB pairing failed', error.message));
+      }
+    }, 1000).unref();
+    setInterval(() => {
+      for (const link of hub.connectedLinks()) {
+        if (Date.now() - link.lastSeen > 40000) link.close();
+        else link.send({ t: 'ping', ts: Date.now() });
+      }
+    }, 15000).unref();
   });
-  startUsb(hub, cfg);
-  startWifi(hub, cfg);
-  setInterval(() => {
-    if (cfg.usb.autoPair && !cfg.usb.pairedDeviceId) {
-      pairUsb().catch(error => log('USB pairing failed', error.message));
-    }
-  }, 1000).unref();
-  // Heartbeat: lets the device show link status and lets us notice dead links.
-  setInterval(() => {
-    for (const link of hub.connectedLinks()) {
-      if (Date.now() - link.lastSeen > 40000) link.close();
-      else link.send({ t: 'ping', ts: Date.now() });
-    }
-  }, 15000);
   process.on('SIGTERM', () => process.exit(0));
 }
 
@@ -420,6 +461,31 @@ function call(method, urlPath, body, timeoutMs, signal) {
   });
 }
 
+async function stopLocalDaemon() {
+  let pid;
+  try { pid = Number(fs.readFileSync(path.join(HOME_DIR, 'daemon.pid'), 'utf8')); }
+  catch (error) { if (error.code === 'ENOENT') return false; throw error; }
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  const status = async () => {
+    try { return await call('GET', '/status', null, 1000); }
+    catch (error) { if (error.code === 'ECONNREFUSED') return null; throw error; }
+  };
+  // A localhost port may be forwarded to another host over SSH.
+  const running = await status();
+  if (running?.pid !== pid || !Array.isArray(running.pending)) return false;
+  const result = await call('POST', '/shutdown', {}, 1000);
+  if (!result.ok) throw new Error('The local AgentReminder daemon did not accept the shutdown request.');
+  for (let attempt = 0; attempt < 20; attempt++) {
+    await new Promise(resolve => setTimeout(resolve, 100));
+    try {
+      if ((await status())?.pid !== pid) return true;
+    } catch (error) {
+      if (error.code !== 'ECONNRESET') throw error;
+    }
+  }
+  throw new Error('The local AgentReminder daemon is still running.');
+}
+
 function spawnDaemon() {
   ensureHome();
   const out = fs.openSync(LOG_PATH, 'a');
@@ -431,12 +497,12 @@ function spawnDaemon() {
 async function ensureDaemon() {
   try { await call('GET', '/status', null, 800); return true; } catch (_) { /* start it */ }
   spawnDaemon();
-  // Give USB/Wi-Fi a moment to come up so the very first request can reach the device.
+  // Give the paired board time to reconnect on the first request after startup.
   for (let i = 0; i < 25; i++) {
     await new Promise(r => setTimeout(r, 200));
     try {
       const s = await call('GET', '/status', null, 500);
-      if (s.devices.length || i > 15) return true;
+      if (s.devices.length || (i > 15 && !loadConfig().bluetooth.key) || i === 24) return true;
     } catch (_) { /* not yet */ }
   }
   return false;
@@ -467,7 +533,7 @@ async function preparePairing(autoSetup = false) {
 }
 
 async function setupUsb() {
-  if (!loadConfig().usb.pairedDeviceId) saveUsbConfig({ enabled: true, autoPair: true });
+  if (!loadConfig().usb.pairedDeviceId) savePairingConfig({ enabled: true, autoPair: true });
   await preparePairing(true);
   console.log('插入已烧录的设备，出现配对卡片后按最右侧键同意。');
 }
@@ -482,7 +548,7 @@ async function pairDevice() {
     await new Promise(resolve => setTimeout(resolve, 500));
   }
   if (result?.deviceId) {
-    console.log(`USB 配对完成：${result.deviceId}`);
+    console.log(`${result.bluetoothPaired ? '蓝牙配对完成，请等待 status 显示 connected 再拔线' : 'USB 配对完成'}：${result.deviceId}`);
     return;
   }
   const message = {
@@ -539,35 +605,39 @@ function transcriptTitle(file, sessionId) {
   finally { if (fd !== undefined) fs.closeSync(fd); }
 }
 
-function codexTitle(sessionId) {
-  if (!/^[a-zA-Z0-9_-]{1,128}$/.test(sessionId || '')) return '';
+function codexThread(sessionId) {
+  if (!/^[a-zA-Z0-9_-]{1,128}$/.test(sessionId || '')) return {};
   const home = process.env.CODEX_HOME || path.join(os.homedir(), '.codex');
   try {
     const dbs = fs.readdirSync(home).filter(f => /^state_\d+\.sqlite$/.test(f)).sort((a, b) => Number(b.match(/\d+/)[0]) - Number(a.match(/\d+/)[0]));
+    const bin = process.platform === 'darwin' ? '/usr/bin/sqlite3' : 'sqlite3';
     for (const db of dbs) {
       // Prefer the desktop's renamed chat name, then its generated title.
-      const query = `SELECT COALESCE(NULLIF(name, ''), title) FROM threads WHERE id='${sessionId}' LIMIT 1;`;
-      const bin = process.platform === 'darwin' ? '/usr/bin/sqlite3' : 'sqlite3';
-      try {
-        const result = execFileSync(bin, ['-readonly', path.join(home, db), query], { encoding: 'utf8', timeout: 400, maxBuffer: 32768, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-        if (result) return result;
-      } catch (_) {
-        // Older Codex databases do not have the optional `name` column.
+      for (const title of ["COALESCE(NULLIF(name, ''), title)", 'title']) {
+        const query = `SELECT ${title} AS title, cwd FROM threads WHERE id='${sessionId}' LIMIT 1;`;
         try {
-          const result = execFileSync(bin, ['-readonly', path.join(home, db), `SELECT title FROM threads WHERE id='${sessionId}' LIMIT 1;`], { encoding: 'utf8', timeout: 400, maxBuffer: 32768, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
-          if (result) return result;
-        } catch (_) { /* unavailable: use hook/transcript metadata */ }
+          const result = execFileSync(bin, ['-readonly', '-json', path.join(home, db), query], { encoding: 'utf8', timeout: 400, maxBuffer: 32768, stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+          if (result) return JSON.parse(result)[0] || {};
+          break;
+        } catch (_) { /* older databases may lack the name column */ }
       }
     }
   } catch (_) { /* optional local metadata */ }
-  return '';
+  return {};
 }
 
-function describeSession(input, agent) {
+function describeSession(input, agent, fallbackCwd = '') {
   const sessionId = input.session_id || input.thread_id || '';
   const explicit = input.conversation_title || input.session_title || input.thread_title || input.session_name;
-  const title = explicit || (agent === 'codex' ? codexTitle(sessionId) : '') || transcriptTitle(input.transcript_path, sessionId);
-  return { sessionId: clip(sessionId, 128), conversation: clip(String(title || (sessionId ? `对话 ${sessionId.slice(0, 8)}` : '未命名对话')).replace(/\s+/g, ' ').trim(), 100) };
+  const cwd = typeof input.cwd === 'string' ? input.cwd : '';
+  const thread = agent === 'codex' && (!explicit || !cwd) ? codexThread(sessionId) : {};
+  const title = explicit || thread.title || transcriptTitle(input.transcript_path, sessionId);
+  return {
+    sessionId: clip(sessionId, 128),
+    conversation: clip(String(title || (sessionId ? `对话 ${sessionId.slice(0, 8)}` : '未命名对话')).replace(/\s+/g, ' ').trim(), 100),
+    host: hostName,
+    project: clip(path.basename(cwd || thread.cwd || fallbackCwd), 80),
+  };
 }
 
 function describeTool(input) {
@@ -593,8 +663,7 @@ async function runHook(argv) {
   }
   const input = await readStdin();
   const cfg = loadConfig();
-  const project = clip(path.basename(input.cwd || process.cwd()), 80);
-  const session = describeSession(input, agent);
+  const session = describeSession(input, agent, process.cwd());
   const out = (obj) => { if (obj) process.stdout.write(JSON.stringify(obj)); };
 
   try {
@@ -602,7 +671,7 @@ async function runHook(argv) {
       if (!(await ensureDaemon())) return;
       const { title, detail, reason } = describeTool(input);
       const timeoutSec = cfg.approvalTimeoutSec;
-      const r = await call('POST', '/approval', { timeoutSec, info: { agent, project, ...session, title, detail, reason } }, (timeoutSec + 10) * 1000);
+      const r = await call('POST', '/approval', { timeoutSec, info: { agent, ...session, title, detail, reason } }, (timeoutSec + 10) * 1000);
       if (!r.decision) return;                         // no device / timeout / "use terminal": normal flow
       const msg = r.decision === 'deny' ? 'Denied from AgentReminder device' : 'Approved from AgentReminder device';
       if (event === 'permission') {
@@ -617,7 +686,7 @@ async function runHook(argv) {
     if (event === 'stop') {
       if (!cfg.notify.stop || input.stop_hook_active) return;
       if (!(await ensureDaemon())) return;
-      await call('POST', '/notify', { info: { agent, project, ...session, kind: 'done', title: '任务完成',
+      await call('POST', '/notify', { info: { agent, ...session, kind: 'done', title: '任务完成',
         detail: clip(input.last_assistant_message || '', 400) } }, 3000);
       return;                                          // never block stopping
     }
@@ -627,7 +696,7 @@ async function runHook(argv) {
       if (type === 'permission_prompt') return;        // covered by PermissionRequest
       if (!cfg.notify.idle) return;
       if (!(await ensureDaemon())) return;
-      await call('POST', '/notify', { info: { agent, project, ...session, kind: type === 'idle_prompt' ? 'idle' : 'info',
+      await call('POST', '/notify', { info: { agent, ...session, kind: type === 'idle_prompt' ? 'idle' : 'info',
         title: type === 'idle_prompt' ? '等待你的输入' : (input.title || '通知'), detail: clip(input.message || '', 400) } }, 3000);
     }
   } catch (e) {
@@ -655,24 +724,30 @@ function mergeHooks(file, hooks) {
 function shellQuote(s) { return "'" + s.replace(/'/g, "'\\''") + "'"; }
 function hookCmd(agent, event) { return `${shellQuote(process.execPath)} ${shellQuote(__filename)} hook --agent ${agent} --event ${event}`; }
 
+const hookSettings = {
+  codex: path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'hooks.json'),
+  claude: path.join(os.homedir(), '.claude', 'settings.json'),
+  dsh: path.join(HOME_DIR, 'dsh-hooks.json'),
+};
+
 function install(target) {
   const t = (cfg) => ({ type: 'command', command: cfg.cmd, timeout: cfg.timeout });
   const appr = loadConfig().approvalTimeoutSec + 30;
   if (target === 'codex') {
-    const f = mergeHooks(path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'hooks.json'), {
+    const f = mergeHooks(hookSettings.codex, {
       PermissionRequest: [{ hooks: [t({ cmd: hookCmd('codex', 'permission'), timeout: appr })] }],
       Stop: [{ hooks: [t({ cmd: hookCmd('codex', 'stop'), timeout: 10 })] }],
     });
     console.log(`已写入 ${f}\n在 Codex 里运行 /hooks 审核并信任这些 hook。`);
   } else if (target === 'dsh') {
-    const f = mergeHooks(path.join(HOME_DIR, 'dsh-hooks.json'), {
+    const f = mergeHooks(hookSettings.dsh, {
       PreToolUse: [{ matcher: loadConfig().dshMatcher || 'bash|shell|write|edit|apply_patch|Bash|Shell|Write|Edit|MultiEdit',
         hooks: [t({ cmd: hookCmd('dsh', 'pretool'), timeout: appr })] }],
       Stop: [{ hooks: [t({ cmd: hookCmd('dsh', 'stop'), timeout: 10 })] }],
     });
     console.log(`已写入 ${f}\n把 integrations/dsh/cordis.patch.yml 里的 configPath 指向它（见 README）。`);
   } else if (target === 'claude') {
-    const f = mergeHooks(path.join(os.homedir(), '.claude', 'settings.json'), {
+    const f = mergeHooks(hookSettings.claude, {
       PermissionRequest: [{ hooks: [t({ cmd: hookCmd('claude', 'permission'), timeout: appr })] }],
       Notification: [{ hooks: [t({ cmd: hookCmd('claude', 'notification'), timeout: 10 })] }],
       Stop: [{ hooks: [t({ cmd: hookCmd('claude', 'stop'), timeout: 10 })] }],
@@ -690,8 +765,18 @@ async function main() {
     case 'daemon': return runDaemon();
     case 'pair': return pairDevice();
     case 'setup-usb': return setupUsb();
-    case 'start': { const ok = await ensureDaemon(); console.log(ok ? 'daemon running' : 'daemon failed, see ' + LOG_PATH); return; }
-    case 'stop': try { await call('POST', '/shutdown', {}, 1000); console.log('stopped'); } catch (_) { console.log('not running'); } return;
+    case 'start': {
+      const ok = await ensureDaemon();
+      console.log(ok ? 'daemon running' : 'daemon failed, see ' + LOG_PATH);
+      if (!ok) process.exitCode = 1;
+      return;
+    }
+    case 'stop': {
+      const stopped = await stopLocalDaemon();
+      if (!stopped && rest[0] === '--if-running') process.exitCode = 3;
+      console.log(stopped ? 'stopped' : 'local daemon not running');
+      return;
+    }
     case 'status': try { console.log(JSON.stringify(await call('GET', '/status', null, 1000), null, 2)); } catch (_) { console.log('daemon not running'); } return;
     case 'test': {
       await ensureDaemon();
@@ -728,4 +813,4 @@ if (require.main === module) {
   main().catch(e => { console.error(e.message); process.exitCode = 1; });
 }
 
-module.exports = { Hub, Link, mergeHooks, describeTool, describeSession, transcriptTitle, shellQuote, call, ensureDaemon, loadConfig };
+module.exports = { Hub, Link, mergeHooks, describeTool, describeSession, transcriptTitle, shellQuote, call, ensureDaemon, stopLocalDaemon, loadConfig, HOME_DIR, hookSettings };

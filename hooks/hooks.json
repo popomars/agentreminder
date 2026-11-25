@@ -2,7 +2,7 @@
   "description": "AgentReminder: forward approvals / completion to the ESP32-S3 device",
   "hooks": {
     "PermissionRequest": [
-      { "hooks": [ { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/host/agentreminder.js\" hook --agent claude --event permission", "timeout": 120 } ] }
+      { "hooks": [ { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/host/agentreminder.js\" hook --agent claude --event permission", "timeout": 330 } ] }
     ],
     "Notification": [
       { "matcher": "idle_prompt|agent_needs_input|elicitation_dialog", "hooks": [ { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/host/agentreminder.js\" hook --agent claude --event notification", "timeout": 10 } ] }

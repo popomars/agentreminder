@@ -3,6 +3,7 @@
 // Mirror native App Server requests on the ESP32 without changing Codex's UI.
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const readline = require('node:readline');
 const { call, ensureDaemon, loadConfig, describeSession } = require('./agentreminder');
@@ -17,24 +18,39 @@ function approvalCard(message) {
   if (!title || (typeof message.id !== 'number' && typeof message.id !== 'string')) return null;
   const params = message.params || {};
   // The device has two choices. Leave prompts with other required choices in Codex.
-  if (Array.isArray(params.availableDecisions) &&
-      !['accept', 'decline'].every(decision => params.availableDecisions.includes(decision))) return null;
-  const project = typeof params.cwd === 'string' ? path.basename(params.cwd) : '';
+  if (!approvalChoices(message)) return null;
   const network = params.networkApprovalContext;
   const reason = params.reason || (network?.host ? `访问网络：${network.host}` : params.command);
   return {
-    agent: 'codex', title, project,
-    ...describeSession({ thread_id: params.threadId }, 'codex'),
+    agent: 'codex', title,
+    ...describeSession({ thread_id: params.threadId, cwd: params.cwd }, 'codex'),
     reason: typeof reason === 'string' ? reason.slice(0, 300) : '',
   };
 }
 
+function approvalChoices(message) {
+  const choices = message.params?.availableDecisions;
+  if (!Array.isArray(choices) || !choices.length) return { allow: 'accept', deny: 'decline' };
+  const deny = choices.includes('decline') ? 'decline' : choices.includes('cancel') ? 'cancel' : null;
+  return choices.includes('accept') && deny ? { allow: 'accept', deny } : null;
+}
+
+function report(event, details) {
+  const home = process.env.AGENTREMINDER_HOME || path.join(os.homedir(), '.agentreminder');
+  try {
+    fs.mkdirSync(home, { recursive: true });
+    fs.appendFileSync(path.join(home, 'codex-bridge.log'),
+      JSON.stringify({ at: new Date().toISOString(), event, ...details }) + '\n', { mode: 0o600 });
+  } catch (_) { /* diagnostic logging must not interrupt approvals */ }
+}
+
 class ApprovalBridge {
-  constructor({ toDesktop, toServer, askDevice, makeCard = approvalCard }) {
+  constructor({ toDesktop, toServer, askDevice, makeCard = approvalCard, trace = () => {} }) {
     this.toDesktop = toDesktop;
     this.toServer = toServer;
     this.askDevice = askDevice;
     this.makeCard = makeCard;
+    this.trace = trace;
     this.pending = new Map();
     this.answered = new Set();
   }
@@ -55,26 +71,33 @@ class ApprovalBridge {
     }
     const id = message.id;
     if (this.pending.has(id)) return;
+    if (Object.hasOwn(approvalTypes, message.method)) {
+      const choices = message.params?.availableDecisions;
+      this.trace('native-request', { id, method: message.method,
+        choices: Array.isArray(choices) ? choices.map(item => typeof item === 'string' ? item : 'structured') : null });
+    }
     const card = this.makeCard(message);
     if (!card) return;
     this.answered.delete(id);
     const controller = new AbortController();
     this.pending.set(id, controller);
-    this.settleFromDevice(id, card, controller);
+    this.settleFromDevice(id, card, controller, approvalChoices(message));
   }
 
-  async settleFromDevice(id, card, controller) {
+  async settleFromDevice(id, card, controller, choices) {
     try {
       const result = await this.askDevice(card, controller.signal);
       if (this.pending.get(id) !== controller) return;
+      this.trace('device-response', { id, decision: result?.decision || null, reason: result?.reason || null });
       if (result?.decision !== 'allow' && result?.decision !== 'deny') return;
       this.answered.add(id);
       if (this.answered.size > 256) this.answered.delete(this.answered.values().next().value);
       this.toServer(JSON.stringify({
         id,
-        result: { decision: result.decision === 'allow' ? 'accept' : 'decline' },
+        result: { decision: choices[result.decision] },
       }));
-    } catch (_) {
+    } catch (error) {
+      if (!controller.signal.aborted) this.trace('device-error', { id, code: error.code || error.name });
       // The native approval stays available when the device goes offline.
     } finally {
       if (this.pending.get(id) === controller) this.pending.delete(id);
@@ -85,6 +108,7 @@ class ApprovalBridge {
     const message = parse(line);
     if (message && !message.method && (Object.hasOwn(message, 'result') || Object.hasOwn(message, 'error'))) {
       if (this.answered.has(message.id)) return;
+      if (this.pending.has(message.id)) this.trace('desktop-answer', { id: message.id });
       this.stopMirroring(message.id);
     }
     this.toServer(line);
@@ -120,11 +144,13 @@ function run(args) {
   child.once('error', error => { console.error(error.message); process.exitCode = 1; });
   child.once('close', code => { process.exitCode = code ?? 1; });
   if (!mirror) return;
+  report('started', { pid: process.pid });
 
   const bridge = new ApprovalBridge({
     toDesktop: line => process.stdout.write(line + '\n'),
     toServer: line => { if (child.stdin.writable) child.stdin.write(line + '\n'); },
     askDevice,
+    trace: report,
   });
   const desktop = readline.createInterface({ input: process.stdin, crlfDelay: Infinity });
   const server = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });

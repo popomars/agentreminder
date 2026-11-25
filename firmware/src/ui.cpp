@@ -2,6 +2,7 @@
 #include "ui.h"
 #include "board_config.h"
 #include <lvgl.h>
+#include <algorithm>
 #include <vector>
 #include <esp_heap_caps.h>
 
@@ -11,11 +12,23 @@ static constexpr int stripRows = 32;
 static std::vector<Item> approvals;   // oldest first
 static std::vector<Item> notes;       // newest first, max 20
 static lv_obj_t *content;
+static lv_obj_t *approvalCountLabel;
+static String displayedApprovalId;
 static bool dirty = true;
 static uint32_t dimAt = 0;
 
+struct Connection {
+  uint8_t channel;
+  const char *name;
+  bool active;
+  String host;
+};
+static Connection connections[] = {{CH_BLE, "蓝牙", false, {}}, {CH_USB, "USB", false, {}}, {CH_WIFI, "Wi-Fi", false, {}}};
+
 LV_FONT_DECLARE(agentreminder_cjk_35);
-static lv_font_t fontCn;
+LV_FONT_DECLARE(agentreminder_hint_22);
+LV_FONT_DECLARE(agentreminder_meta_24);
+static lv_font_t fontCn, fontMeta;
 static bool fontReady = false;
 bool ui_font_ok() { return fontReady; }
 #define FONT (&fontCn)
@@ -54,6 +67,23 @@ static lv_obj_t *label(lv_obj_t *parent, const String &txt, lv_color_t col, bool
   lv_label_set_text(l, txt.c_str());
   if (wrap) { lv_obj_set_width(l, lv_pct(100)); lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP); }
   return l;
+}
+
+static lv_obj_t *metaLabel(lv_obj_t *parent, const String &text, lv_color_t color) {
+  auto *l = label(parent, text, color);
+  lv_obj_set_style_text_font(l, &fontMeta, 0);
+  return l;
+}
+
+static void cardMetadata(lv_obj_t *parent, const Item &item, bool scroll) {
+  if (item.host.isEmpty()) return;
+  auto color = lv_color_hex(0xC5C5C5);
+  auto *host = metaLabel(parent, "主机 " + item.host, color);
+  auto *project = metaLabel(parent, "项目 " + item.project, color);
+  if (scroll) {
+    lv_label_set_long_mode(host, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_label_set_long_mode(project, LV_LABEL_LONG_SCROLL_CIRCULAR);
+  }
 }
 
 static void decide(const char *decision, int gpio = -1) {
@@ -116,10 +146,35 @@ static lv_obj_t *button(lv_obj_t *parent, const char *txt, uint32_t color, const
 
 /* ---------------- screens ---------------- */
 
+static void buildIdle() {
+  lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_flex_align(content, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
+  String host;
+  for (const auto &connection : connections) {
+    if (connection.active) { host = connection.host; break; }
+  }
+  auto *title = label(content, host.isEmpty() ? String("未连接主机") : host, lv_color_white());
+  lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+  lv_obj_set_style_margin_bottom(title, 12, 0);
+  for (const auto &connection : connections) {
+    if (!connection.active && connection.channel != CH_BLE) continue;
+    String text = String(connection.name) + (connection.active ? "已连接" : "未连接");
+    if (connection.active && connection.host != host) text += " · " + connection.host;
+    auto *state = metaLabel(content, text, lv_color_hex(connection.active ? 0x64DEAD : 0xB5B5B5));
+    lv_obj_set_style_text_align(state, LV_TEXT_ALIGN_CENTER, 0);
+  }
+}
+
+static void updateApprovalCount() {
+  lv_label_set_text_fmt(approvalCountLabel, "待审批 %u 项", static_cast<unsigned>(approvals.size()));
+}
+
 static void buildApproval() {
   const Item &it = approvals.front();
   Serial.printf("{\"t\":\"log\",\"msg\":\"render approval %s\"}\n", it.id.c_str());
   lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
+  approvalCountLabel = metaLabel(content, "", lv_color_hex(0xC5C5C5));
+  updateApprovalCount();
 
   lv_obj_t *summary = lv_obj_create(content);
   lv_obj_remove_style_all(summary);
@@ -132,6 +187,7 @@ static void buildApproval() {
 
   label(summary, it.reason.length() ? it.reason : it.title, lv_color_hex(0xFFD369));
   if (it.conversation.length()) label(summary, it.conversation, lv_color_white());
+  cardMetadata(content, it, true);
 
   lv_obj_t *btns = lv_obj_create(content);
   lv_obj_remove_style_all(btns);
@@ -145,6 +201,10 @@ static void buildApproval() {
 
 static void buildNotes() {
   lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
+  if (std::any_of(notes.begin(), notes.end(), [](const Item &note) { return note.completed; })) {
+    auto *hint = label(content, "单击任务可清除", lv_color_hex(0xB5B5B5));
+    lv_obj_set_style_text_font(hint, &agentreminder_hint_22, 0);
+  }
   for (size_t i = 0; i < notes.size(); i++) {
     const Item &n = notes[i];
     lv_obj_t *card = lv_obj_create(content);
@@ -158,12 +218,26 @@ static void buildNotes() {
     lv_obj_add_event_cb(card, onDismiss, LV_EVENT_CLICKED, (void *)(uintptr_t)i);
     label(card, n.title, lv_color_white());
     if (n.conversation.length()) label(card, n.conversation, lv_color_hex(0xD2D2D2));
+    cardMetadata(card, n, false);
   }
 }
 
 static void rebuild() {
+  if (approvalCountLabel && !approvals.empty() && displayedApprovalId == approvals.front().id) {
+    // A change behind the visible card should not reset its scroll position.
+    updateApprovalCount();
+    dirty = false;
+    return;
+  }
+  approvalCountLabel = nullptr;
+  displayedApprovalId = approvals.empty() ? String() : approvals.front().id;
   lv_obj_clean(content);
-  if (approvals.empty()) {
+  lv_obj_set_flex_align(content, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_START);
+  if (approvals.empty() && notes.empty()) {
+    lv_obj_remove_flag(content, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_scroll_to_y(content, 0, LV_ANIM_OFF);
+    buildIdle();
+  } else if (approvals.empty()) {
     lv_obj_add_flag(content, LV_OBJ_FLAG_SCROLLABLE);
     buildNotes();
   } else {
@@ -186,11 +260,15 @@ void ui_init() {
   fontCn.fallback = &lv_font_montserrat_28;
   fontCn.line_height = 45;
   fontCn.base_line = 10;
+  fontMeta = agentreminder_meta_24;
+  fontMeta.fallback = FONT;
+  fontMeta.line_height = 36;
   fontReady = true;
   // Exercise the actual LVGL bitmap decoder, not just font character coverage.
-  for (uint32_t cp : {0x41U, 0x5BA1U, 0x6279U, 0x62D2U, 0x7EDDU, 0x00B7U, 0x2192U}) {
+  for (uint32_t cp : {0x41U, 0x5BA1U, 0x6279U, 0x62D2U, 0x7EDDU, 0x00B7U, 0x2192U, 0x84DDU, 0x9879U}) {
+    const lv_font_t *font = cp == 0x84DDU || cp == 0x9879U ? &fontMeta : FONT;
     lv_font_glyph_dsc_t glyph{};
-    if (!lv_font_get_glyph_dsc(FONT, &glyph, cp, 0) || glyph.is_placeholder) { fontReady = false; break; }
+    if (!lv_font_get_glyph_dsc(font, &glyph, cp, 0) || glyph.is_placeholder) { fontReady = false; break; }
     lv_draw_buf_t *buf = lv_draw_buf_create(glyph.box_w, glyph.box_h, LV_COLOR_FORMAT_A8, LV_STRIDE_AUTO);
     bool ok = buf && lv_font_get_glyph_bitmap(&glyph, buf);
     if (ok) {
@@ -265,4 +343,40 @@ void ui_add_notify(const Item &it) {
 void ui_remove(const String &id) {
   for (size_t i = 0; i < approvals.size(); i++)
     if (approvals[i].id == id) { approvals.erase(approvals.begin() + i); dirty = true; return; }
+}
+
+void ui_set_connected_host(uint8_t channel, const String &host) {
+  for (auto &connection : connections) {
+    if (connection.channel != channel) continue;
+    const String name = host.isEmpty() ? String("未知主机") : host;
+    if (!connection.active || connection.host != name) {
+      connection.active = true;
+      connection.host = name;
+      if (approvals.empty() && notes.empty()) { wake(); dirty = true; }
+    }
+    break;
+  }
+}
+
+const String &ui_connected_host(uint8_t channel) {
+  static const String empty;
+  for (const auto &connection : connections)
+    if (connection.channel == channel && connection.active) return connection.host;
+  return empty;
+}
+
+void ui_remove_channel(uint8_t channel) {
+  for (auto &connection : connections) {
+    if (connection.channel == channel && connection.active) {
+      connection.active = false;
+      connection.host = "";
+      if (approvals.empty() && notes.empty()) { wake(); dirty = true; }
+    }
+  }
+  for (auto &approval : approvals) approval.channels &= ~channel;
+  const auto end = std::remove_if(approvals.begin(), approvals.end(), [](const Item &item) { return !item.channels; });
+  if (end != approvals.end()) {
+    approvals.erase(end, approvals.end());
+    dirty = true;
+  }
 }

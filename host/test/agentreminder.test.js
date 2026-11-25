@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 process.env.AGENTREMINDER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'agentreminder-test-'));
-const { Hub, Link, mergeHooks, shellQuote } = require('../agentreminder');
+const { Hub, Link, loadConfig, mergeHooks, shellQuote } = require('../agentreminder');
 function device(hub, name = 'test') {
   const messages = [];
   const link = new Link('usb', name, s => messages.push(JSON.parse(s)), () => {}, hub);
@@ -49,6 +49,22 @@ test('no device, timeout and cancelled hook return control to terminal', async (
   assert(a.messages.some(m => m.t === 'cancel'));
   a.link.close();
 });
+
+test('concurrent approvals keep separate deadlines and finish independently', async t => {
+  const hub = new Hub({});
+  const a = device(hub);
+  t.after(() => a.link.close());
+  const timeoutSec = loadConfig().approvalTimeoutSec;
+  assert.equal(timeoutSec, 300);
+  const first = hub.requestApproval({ title: 'first' }, 10);
+  const next = hub.requestApproval({ title: 'second' }, timeoutSec * 1000);
+  assert.deepEqual([...hub.pending.keys()], [first.id, next.id]);
+  assert.equal(a.messages.at(-1).timeout, 300);
+  assert.equal((await first.promise).reason, 'timeout');
+  assert.deepEqual([...hub.pending.keys()], [next.id]);
+  hub.onMessage(a.link, { t: 'decision', id: next.id, decision: 'allow' });
+  assert.equal((await next.promise).decision, 'allow');
+});
 test('install preserves unrelated settings and refuses malformed config', () => {
   const file = path.join(process.env.AGENTREMINDER_HOME, 'settings.json');
   const original = { model: 'existing', hooks: { Stop: [{ hooks: [{ command: 'other' }] }] } };
@@ -75,6 +91,20 @@ test('cards carry conversation names and the actual approval reason', () => {
   const tool = describeTool({ tool_name: 'Bash', tool_input: { command: 'pio run -t upload', description: '将修复后的中文字库烧录到设备' } });
   assert.equal(tool.reason, '将修复后的中文字库烧录到设备');
   assert.equal(tool.detail, 'pio run -t upload');
+});
+
+test('when the agent runs on a remote host, card metadata preserves its source', async () => {
+  const hub = new Hub({});
+  const a = device(hub);
+  const info = { host: 'remote-agent', project: '远程项目' };
+  const request = hub.requestApproval(info, 1000);
+  assert.equal(a.messages.at(-1).host, info.host);
+  assert.equal(a.messages.at(-1).project, info.project);
+  hub.notify(info);
+  assert.equal(a.messages.at(-1).host, info.host);
+  assert.equal(a.messages.at(-1).project, info.project);
+  a.link.close();
+  await request.promise;
 });
 
 test('USB pairing confirmation reaches only the selected link and locks future cards to that device', async () => {

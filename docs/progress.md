@@ -7,14 +7,15 @@
   The stock ST7789/CST816 template was not usable on this device.
 - Built and flashed v0.2.0 over `/dev/cu.usbmodem2101`. Original 16 MB flash is
   backed up at `.runtime/backups/waveshare-before-agentreminder.bin` (not for
-  publication; may contain device data).
-- Real USB handshake and host daemon are running.
+  publication; may contain device data). SHA-256:
+  `971f6ee2b5cb29c7d7d14254dbc3beb61b4167005b0f6b583fd739e0597a2a39`.
+- Real USB handshake and host daemon are running. Device ID `E476C83F1FB8`.
 - Touchscreen round trip passed: Claude-compatible allow and Codex-compatible deny.
 - Physical keys passed with the user's explicit confirmation at 18:25 Shanghai:
   left GPIO18 rejects, right GPIO0 approves. Center PMU power key is unchanged.
   Keys have 35 ms debounce and ignore held presses when the current card changes.
 - Card shows the conversation name, agent, project, tool, approval reason and
-  operation details. Verified against a real Codex session.
+  operation details. Current Codex session resolves to `完善 Agent ESP32 审批插件`.
   Codex prefers the SQLite thread `name`, then `title`. Claude uses session index
   or transcript custom title/first prompt. Explicit hook titles take priority.
 - Replaced the limited built-in SimSun subset with generated Noto Sans SC
@@ -62,8 +63,17 @@ accepted yet, and hook trust was not bypassed.
 
 ## Remaining transports / remote work
 
-USB is the default. Optional Wi-Fi TCP code remains available but has no pairing
-or encryption and was not tested on this device. BLE is not implemented yet.
+macOS supports BLE following USB enrollment on firmware 0.3.0 and host 0.4.0.
+On a Waveshare 2.16-inch board, USB enrollment, a real Codex approval returned
+over BLE after unplugging USB, completion-card display, and automatic BLE
+reconnection were verified. The macOS terminal helper builds for arm64 and x86_64.
+Optional Wi-Fi TCP code remains available for existing standalone setups.
+
+The combined installer can verify and flash the checked-in firmware before
+installing hooks. The uninstaller only removes managed host files and hooks and
+stops the local daemon. A duplicate daemon exit leaves the device transports to
+the process that owns the localhost port. The macOS Bluetooth helper waits for
+the radio to turn back on without repeatedly spawning.
 Remote SSH forwarding instructions are in README; no real remote agent has been
 accepted. Managed cloud tasks need their platform's actual event/approval surface,
 not an assumption that a local lifecycle hook works there.
@@ -88,3 +98,11 @@ packages/repositories. Font regeneration and licensing are in `firmware/src/font
 - [Claude hooks](https://code.claude.com/docs/en/hooks)
 - [Waveshare source and schematic](https://github.com/waveshareteam/ESP32-S3-Touch-AMOLED-2.16)
 - [Waveshare board pin map](https://docs.waveshare.com/ESP32-S3-Touch-AMOLED-2.16)
+
+## USB install and precompiled images
+
+Host v0.3.1 installs hooks before USB enrollment and keeps the daemon waiting
+for a device. The first recognized device displays a confirmation card.
+Firmware v0.2.0 is checked into `firmware/release/waveshare-amoled-2.16`.
+Run `bash flash.sh --check` to check the four images, or `bash flash.sh` to write
+them with the same offsets used by PlatformIO.

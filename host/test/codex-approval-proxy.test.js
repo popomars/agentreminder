@@ -1,6 +1,10 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const { execFileSync } = require('node:child_process');
 const { ApprovalBridge, approvalCard } = require('../codex-approval-proxy');
 const request = (id = 7) => JSON.stringify({
   id, method: 'item/commandExecution/requestApproval',
@@ -74,4 +78,38 @@ test('does not mirror unsupported decisions and does not intercept desktop reque
   assert.equal(device[0].signal.aborted, false);
   bridge.close();
   assert.equal(device[0].signal.aborted, true);
+});
+
+test('a prompt that offers cancel instead of decline can be rejected on the device', async () => {
+  const { bridge, server, device } = fixture();
+  const body = JSON.parse(request());
+  body.params.availableDecisions = ['accept', 'cancel'];
+  bridge.fromServer(JSON.stringify(body));
+  device[0].resolve({ decision: 'deny' });
+  await nextTick();
+  assert.deepEqual(server, [response(7, 'cancel')]);
+});
+
+test('native file approval uses the chat working directory when the request has none', t => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'agentreminder-codex-thread-'));
+  const original = process.env.CODEX_HOME;
+  t.after(() => {
+    if (original === undefined) delete process.env.CODEX_HOME;
+    else process.env.CODEX_HOME = original;
+    fs.rmSync(home, { recursive: true, force: true });
+  });
+  const db = path.join(home, 'state_1.sqlite');
+  try {
+    execFileSync('sqlite3', [db, "CREATE TABLE threads (id TEXT, title TEXT, cwd TEXT); INSERT INTO threads VALUES ('test-thread', '项目聊天', '/tmp/项目一');"]);
+  } catch (error) {
+    if (error.code === 'ENOENT') { t.skip('sqlite3 is unavailable'); return; }
+    throw error;
+  }
+  process.env.CODEX_HOME = home;
+  const request = { id: 1, method: 'item/fileChange/requestApproval', params: { threadId: 'test-thread' } };
+  const card = approvalCard(request);
+  assert.equal(card.project, '项目一');
+  assert.equal(card.conversation, '项目聊天');
+  assert(card.host);
+  assert.equal(approvalCard({ ...request, params: { ...request.params, cwd: '/tmp/项目二' } }).project, '项目二');
 });

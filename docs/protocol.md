@@ -1,11 +1,12 @@
 # AgentReminder protocol
 
-Every message is one JSON object per line (NDJSON, UTF-8, `\n`). USB and Wi-Fi use the same protocol.
+Every application message is one JSON object per line (NDJSON, UTF-8, `\n`). USB, Bluetooth and Wi-Fi share the card protocol.
 
 - **USB**: ESP32-S3 native USB CDC (`/dev/cu.usbmodem*`). The host scans it automatically.
+- **Bluetooth LE**: macOS CoreBluetooth central and an ESP32 GATT peripheral. The installer includes a universal macOS helper. The host stays connected when USB is present so unplugging does not interrupt an approval.
 - **Wi-Fi**: the device runs a TCP server on port `47322` and advertises mDNS `agentreminder.local`. The host connects to it as a client.
 
-USB is enabled by default; Wi-Fi must be enabled explicitly in the host configuration. BLE is not implemented.
+USB and Bluetooth are enabled by default on macOS. Bluetooth only advertises and connects after USB enrollment. Wi-Fi must be configured explicitly.
 
 The host ignores any line that is not JSON, such as boot logs. A link only counts as a device once it has answered `hello` with `"app":"agentreminder"`.
 
@@ -13,35 +14,45 @@ The host ignores any line that is not JSON, such as boot logs. A link only count
 
 | t | Fields | Meaning |
 |---|---|---|
-| `hello` | `host, v` | Handshake, sent right after connecting |
+| `hello` | `host, v` | Handshake, sent right after connecting. `host` identifies the connected host on the idle screen. |
 | `ping` | `ts` | Heartbeat every 15 s |
-| `approval` | `id, agent, project, sessionId, conversation, reason, title, detail, timeout` | Approval request. The device deduplicates by `id`. |
+| `approval` | `id, agent, host, project, sessionId, conversation, reason, title, detail, timeout` | Approval request. The device deduplicates by `id`. |
 | `resolved` | `id, decision, by` | Approval settled (here or on another channel). Remove the card. |
 | `cancel` | `id, why` | Agent side cancelled (hook process exited or timed out). Remove the card. |
-| `notify` | `id, agent, project, sessionId, conversation, kind(done/idle/info), title, detail` | Notification |
+| `notify` | `id, agent, host, project, sessionId, conversation, kind(done/idle/info), title, detail` | Notification |
+| `ble-pair` | `id, conversation, key` | USB-only setup. Device shows its pairing approval. On allow it saves the new 32-byte hex key in NVS before replying `decision` with `ble_paired:true`. |
 | `wifi` | `ssid, pass` | Write the Wi-Fi config to NVS and reconnect |
 
 ## Device → host
 
 | t | Fields | Meaning |
 |---|---|---|
-| `hello` | `app:"agentreminder", fw, id, link, ip?` | Handshake reply |
+| `hello` | `app:"agentreminder", fw, id, link, ip?, ble?, ble_paired?` | Handshake reply. `ble:1` indicates USB enrollment support. |
 | `pong` | `ts` | Heartbeat reply |
 | `decision` | `id, decision(allow/deny/skip)` | User choice. `skip` = hand it back to the agent's own terminal prompt |
 | `log` | `msg` | Debug output, written to the daemon log |
+
+## Bluetooth session
+
+The GATT service UUID is `B623A0C0-5E48-46D3-BA39-<12 hex characters of board ID>`.
+The write and notify characteristics use `B623A0C1-5E48-46D3-BA39-000000000000` and `B623A0C2-5E48-46D3-BA39-000000000000`, respectively. ATT values form ordered byte streams that may split frames anywhere.
+
+Each frame starts with a two-byte big-endian payload length. The host and device send a fresh 16-byte random nonce in that order. All subsequent frames carry AES-256-GCM ciphertext followed by a 16-byte tag, with a separate key and sequence in each direction. Derive each key with HMAC-SHA256 using the USB enrollment key and the concatenation of `agentreminder-ble-v1:<c2d or d2c>:` (ASCII), the host nonce and the device nonce. The 12-byte GCM nonce is four zero bytes followed by the big-endian 64-bit sequence, starting at zero. The first encrypted exchange is the regular `hello`. The host verifies the board ID before it accepts approvals from this link. The daemon's pairing configuration is stored with mode `0600`.
 
 ## Hook ↔ daemon (127.0.0.1:47321)
 
 - `POST /approval {timeoutSec, info}` → long-polls until it returns `{decision: "allow"|"deny"|null, reason}`
 - `POST /notify {info}` → `{delivered: n}`
-- `POST /pair {}` → asks the sole connected USB device for confirmation and saves its ID on allow. Ordinary cards and decisions are restricted to the enrolled USB ID after pairing.
+- `POST /pair {}` → asks the sole connected USB device for confirmation. On macOS, the supported firmware also stores a Bluetooth enrollment key after confirmation. Ordinary cards and decisions are restricted to the enrolled USB device and its authenticated Bluetooth link.
 - `GET /status`, `POST /raw` (broadcast as-is), `POST /shutdown`
 
 `decision: null` (no device, timeout, or the user tapped "终端") makes the hook print nothing, so the agent falls back to its normal approval flow.
 
+The default approval deadline is 300 seconds from receipt. The device displays the oldest approval and the total pending count. Each request keeps its own deadline while queued.
+
 The optional Codex desktop launcher mirrors native command and file approvals
 through the App Server stdio proxy. It sends the request to the desktop before
-waiting for the same decision on USB. A desktop response or
+waiting for the same decision on the device. A desktop response or
 `serverRequest/resolved` aborts the matching `/approval` call, which closes the
 device card. A device choice sends a single native `accept` or `decline` response.
 The AgentReminder permission hook exits early only in this launcher mode.
@@ -49,6 +60,8 @@ The AgentReminder permission hook exits early only in this launcher mode.
 The last device disconnecting cancels outstanding requests immediately. Heartbeats expire after 40 seconds without a device response. Approval IDs are UUIDs; reconnects replay only pending approvals with their remaining timeout. The device also expires stale approval cards locally if a cancellation cannot arrive.
 
 `conversation` is the current chat name; `reason` is the agent-provided approval message. `title` remains the tool name and `detail` the operation arguments. Session transcripts are inspected locally only for their title/first prompt, never forwarded wholesale.
+
+On cards, `host` identifies the machine where the agent runs, which may differ from the connected host when forwarding over SSH. `project` is the basename of the agent's working directory. The daemon fills in its own hostname for older hooks or local HTTP clients that omit it. The device also accepts older daemons and can use the handshake host if a card lacks `host`.
 
 ## SSH 远程 agent
 
