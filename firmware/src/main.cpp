@@ -6,7 +6,7 @@
 #include <ArduinoJson.h>
 #include "ui.h"
 
-#define FW_VERSION "0.2.3"
+#define FW_VERSION "0.2.4"
 #define TCP_PORT 47322
 #define HOSTNAME "agentreminder"
 
