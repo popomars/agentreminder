@@ -39,11 +39,13 @@ The GitHub installer fetches the host and firmware files from the same commit. U
 
 If pairing times out, reconnect USB or run `node ~/.agentreminder/app/host/agentreminder.js pair`. On Linux, confirm that your user has access to `/dev/ttyACM*`.
 
+To add a board, connect it by USB and run the same `pair` command. The host keeps existing enrollments and sends notifications and supported approvals to all connected paired boards. The first decision clears the matching approval on the other boards.
+
 ### Bluetooth and a new host
 
 Enable Bluetooth on the Mac and grant permission if macOS asks. Wait for `bluetooth: "connected"` in `status`, or `蓝牙已连接` on the board's idle screen, before disconnecting the data cable. Keep the board powered with an installed battery or a USB charger. It reconnects automatically when powered and in range. USB remains available when plugged into a computer. [Waveshare board and power documentation](https://docs.waveshare.com/ESP32-S3-Touch-AMOLED-2.16)
 
-To switch hosts, attach USB to the new computer, install AgentReminder, and confirm on the board. If the new computer already has AgentReminder, run the `pair` command. The latest Bluetooth pairing replaces the previous one. You can temporarily turn off Bluetooth on the old Mac while pairing.
+To switch hosts, attach USB to the new computer, install AgentReminder, and confirm on the board. If the new computer already has AgentReminder, run the `pair` command. Each board stores the Bluetooth key for its most recent host. You can temporarily turn off Bluetooth on the old Mac while pairing.
 
 ### Approve from either Codex Desktop or the device
 
@@ -76,6 +78,10 @@ Codex Desktop uses the desktop bridge for native questions, MCP forms and permis
 Install with `--agent dsh`, install the Claude Code hooks bridge in your dsh profile, and merge the [Cordis example](integrations/dsh/cordis.patch.yml). Set `configPath` to the absolute path of `~/.agentreminder/dsh-hooks.json`. dsh still applies its own approval policy.
 
 For remote agents over SSH, use `--no-pair` on the remote machine and forward the remote loopback port to the local daemon. See [the protocol guide](docs/protocol.md#ssh-远程-agent).
+
+## FoloToy AI Passport
+
+The AI Passport build is a separate community play. It uses the three function buttons on the right and the same host service. USB enrollment and macOS Bluetooth messaging have been tested on the device. Like the Waveshare build, Passport shows receipt times on approvals, questions, and notifications, and keeps only the latest completion per host, project, and conversation. Installation replaces the active play. [Image, controls, and installation](firmware/release/folotoy-ai-passport/README.md)
 
 ## Firmware only
 

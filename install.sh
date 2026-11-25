@@ -142,7 +142,7 @@ run_host() {
 for agent in "${agents[@]}"; do run_host install "$agent"; done
 if "$pair"; then
   run_host setup-usb
-  if [[ "$lang" == en ]]; then echo 'Connect the board by USB. When prompted on the board, confirm with the right button.'; fi
+  if [[ "$lang" == en ]]; then echo 'Connect the board by USB. Follow the prompt on its screen to confirm.'; fi
 fi
 
 say "AgentReminder 已安装到 $install_dir" "AgentReminder is installed in $install_dir"

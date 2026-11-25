@@ -38,3 +38,8 @@ npx --yes lv_font_conv --size 35 --bpp 2 --format lvgl \
 The build enables `LV_LVGL_H_INCLUDE_SIMPLE` , `LV_FONT_FMT_TXT_LARGE`, and `LV_USE_FONT_COMPRESSED`.
 The startup self-test decodes representative Chinese, ASCII and symbol glyphs
 and exposes the result as `font_ok` in the device handshake.
+
+`agentreminder_passport_24.c` covers the same character ranges as the 35 px
+font, using 24 px and 1 bpp for the Passport's smaller application partition.
+Generate it with the 35 px command above using `--size 24 --bpp 1` and
+`agentreminder_passport_24` as the font name and output basename.

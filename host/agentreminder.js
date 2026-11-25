@@ -24,7 +24,7 @@ const crypto = require('crypto');
 const { spawn, execFileSync } = require('child_process');
 const bluetooth = require('./bluetooth');
 
-const VERSION = '0.4.4';
+const VERSION = '0.4.5';
 const HOME_DIR = process.env.AGENTREMINDER_HOME || path.join(os.homedir(), '.agentreminder');
 const CONFIG_PATH = path.join(HOME_DIR, 'config.json');
 const LOG_PATH = path.join(HOME_DIR, 'daemon.log');
@@ -48,6 +48,21 @@ function loadConfig() {
     wifi: { ...DEFAULT_CONFIG.wifi, ...(user.wifi || {}) },
     notify: { ...DEFAULT_CONFIG.notify, ...(user.notify || {}) },
   };
+}
+
+const validDeviceId = id => typeof id === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(id);
+
+function registeredDevices(cfg) {
+  const devices = new Map();
+  const add = (id, key) => {
+    if (!validDeviceId(id)) return;
+    devices.set(id, { id, key: /^[0-9a-f]{64}$/.test(key || '') ? key : null });
+  };
+  add(cfg.usb?.pairedDeviceId, cfg.bluetooth?.key);
+  if (Array.isArray(cfg.pairedDevices)) {
+    for (const device of cfg.pairedDevices) add(device?.id, device?.key);
+  }
+  return devices;
 }
 
 function ensureHome() { fs.mkdirSync(HOME_DIR, { recursive: true }); }
@@ -118,12 +133,15 @@ class Hub {
     this.notificationSequence = 0;
   }
   connectedLinks() { return [...this.links].filter(l => l.ready); }
+  pairings() { return registeredDevices(this.cfg); }
   readyLinks() {
-    const paired = this.cfg.usb?.pairedDeviceId;
-    if (this.cfg.usb?.autoPair && !paired) return [];
-    return this.connectedLinks().filter(l => l.kind === 'ble'
-      ? !!paired && l.pairedDeviceId === paired && l.info.id === paired
-      : !paired || (l.kind === 'usb' && l.info.id === paired));
+    const paired = this.pairings();
+    if (this.cfg.usb?.autoPair && !paired.size) return [];
+    return this.connectedLinks().filter(link => {
+      const pairing = paired.get(link.info.id);
+      if (link.kind === 'ble') return !!pairing && link.pairedDeviceId === pairing.id;
+      return !paired.size || (link.kind === 'usb' && !!pairing);
+    });
   }
   broadcast(obj) { for (const l of this.readyLinks()) l.send(obj); }
   requestLinks(payload) { return this.readyLinks().filter(link => !payload.interaction || link.info.interaction === true); }
@@ -334,16 +352,26 @@ function readBody(req) {
   });
 }
 
-function savePairingConfig(usb, bluetoothKey) {
+function savePairingConfig(usb, device) {
   ensureHome();
   const config = fs.existsSync(CONFIG_PATH) ? JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) : {};
   config.usb = { ...config.usb, ...usb };
-  if (bluetoothKey !== undefined) config.bluetooth = { ...config.bluetooth, key: bluetoothKey };
+  if (device) {
+    const devices = registeredDevices(config);
+    devices.set(device.id, device);
+    config.pairedDevices = [...devices.values()];
+    // Preserve the first enrollment in the legacy fields for older hosts.
+    if (!config.usb.pairedDeviceId || config.usb.pairedDeviceId === device.id) {
+      config.usb.pairedDeviceId = device.id;
+      config.bluetooth = { ...config.bluetooth, key: device.key };
+    }
+  }
   const tmp = `${CONFIG_PATH}.${crypto.randomUUID()}.tmp`;
   try {
     fs.writeFileSync(tmp, JSON.stringify(config, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
     fs.renameSync(tmp, CONFIG_PATH);
   } finally { fs.rmSync(tmp, { force: true }); }
+  return config;
 }
 
 function runDaemon() {
@@ -353,15 +381,20 @@ function runDaemon() {
   let ble;
 
   const prompted = new WeakSet();
-  async function pairUsb(response) {
-    const usb = hub.connectedLinks().filter(link => link.kind === 'usb' && link.info.id);
+  async function pairUsb(response, selected) {
+    const usb = hub.connectedLinks().filter(link => link.kind === 'usb' && validDeviceId(link.info.id));
     if (!usb.length) return { error: 'no-usb' };
-    if (usb.length !== 1) return { error: 'multiple-usb' };
-    const target = usb[0];
+    const devices = hub.pairings();
+    const unpaired = usb.filter(link => !devices.has(link.info.id));
+    const candidates = selected ? usb.filter(link => link === selected) : unpaired.length ? unpaired : usb;
+    if (!candidates.length) return { error: 'no-usb' };
+    if (candidates.length !== 1) return { error: 'multiple-usb' };
+    const target = candidates[0];
     const deviceId = target.info.id;
     const canPairBluetooth = cfg.bluetooth.enabled && bluetooth.available() && target.info.ble === 1 && /^[0-9A-Fa-f]{12}$/.test(deviceId);
-    if (cfg.usb.pairedDeviceId === deviceId && (!canPairBluetooth || (!response && cfg.bluetooth.key && target.info.ble_paired))) {
-      return { deviceId, bluetoothPaired: !!cfg.bluetooth.key };
+    const known = devices.get(deviceId);
+    if (known && (!canPairBluetooth || (!response && known.key && target.info.ble_paired))) {
+      return { deviceId, bluetoothPaired: !!known.key };
     }
     if (hub.pending.size) return { error: 'approval-pending' };
     if (!response && prompted.has(target)) return { error: 'already-prompted' };
@@ -369,16 +402,16 @@ function runDaemon() {
     const key = canPairBluetooth ? crypto.randomBytes(32).toString('hex') : null;
     const { id, promise } = hub.requestApproval({
       agent: 'setup', conversation: hostName, title: '配对这台电脑',
-      detail: `主机：${hostName}\n请按右键同意配对，或按左键拒绝。`,
+      detail: `主机：${hostName}\n请按屏幕「同意」或「拒绝」对应的按键。`,
     }, 60000, target, key);
     response?.on('close', () => { if (!response.writableEnded) hub.cancel(id, 'pairing-client-gone'); });
     const result = await promise;
     if (result.decision !== 'allow') return { error: result.decision || result.reason };
     if (target.closed) return { error: 'device-disconnected' };
     if (key && !result.bluetoothPaired) return { error: 'bluetooth-pairing-not-saved' };
-    savePairingConfig({ pairedDeviceId: deviceId, autoPair: false }, key);
-    Object.assign(cfg.usb, { pairedDeviceId: deviceId, autoPair: false });
-    cfg.bluetooth.key = key;
+    const saved = savePairingConfig({ autoPair: false }, { id: deviceId, key });
+    cfg.pairedDevices = saved.pairedDevices;
+    cfg.usb.autoPair = false;
     if (key) target.info.ble_paired = true;
     ble.tick();
     return { deviceId, bluetoothPaired: !!key };
@@ -389,10 +422,11 @@ function runDaemon() {
     try {
       if (req.headers.origin) return reply(403, { error: 'browser requests are not supported' });
       if (req.method === 'GET' && req.url === '/status') {
+        const pairedDeviceIds = [...hub.pairings().keys()];
         return reply(200, {
-          version: VERSION, pid: process.pid, pairedDeviceId: cfg.usb.pairedDeviceId || null,
-          waitingForUsbPairing: !!(cfg.usb.autoPair && !cfg.usb.pairedDeviceId),
-          bluetooth: ble.status(),
+          version: VERSION, pid: process.pid, pairedDeviceId: pairedDeviceIds[0] ?? null, pairedDeviceIds,
+          waitingForUsbPairing: !!(cfg.usb.autoPair && !pairedDeviceIds.length),
+          bluetooth: ble.status(), bluetoothDevices: ble.states(),
           devices: hub.readyLinks().map(l => ({ kind: l.kind, name: l.name, info: l.info })),
           pending: [...hub.pending.values()].map(p => ({ id: p.payload.id, agent: p.payload.agent, title: p.payload.title })),
         });
@@ -401,7 +435,7 @@ function runDaemon() {
       const body = await readBody(req);
       if (req.url === '/pair' || req.url === '/setup-usb') {
         if (req.url === '/setup-usb') {
-          if (!cfg.usb.pairedDeviceId) {
+          if (!hub.pairings().size) {
             savePairingConfig({ enabled: true, autoPair: true });
             if (!cfg.usb.enabled) {
               cfg.usb.enabled = true;
@@ -445,11 +479,12 @@ function runDaemon() {
     startUsb(hub, cfg);
     startWifi(hub, cfg);
     setInterval(() => {
-      const upgrade = cfg.usb.pairedDeviceId && cfg.bluetooth.enabled && bluetooth.available() &&
-        hub.connectedLinks().some(link => link.kind === 'usb' && link.info.id === cfg.usb.pairedDeviceId && link.info.ble === 1 &&
-          (!cfg.bluetooth.key || !link.info.ble_paired));
-      if ((cfg.usb.autoPair && !cfg.usb.pairedDeviceId) || upgrade) {
-        pairUsb().catch(error => log('USB pairing failed', error.message));
+      const devices = hub.pairings();
+      const upgrade = cfg.bluetooth.enabled && bluetooth.available() &&
+        hub.connectedLinks().find(link => link.kind === 'usb' && link.info.ble === 1 && devices.has(link.info.id) &&
+          (!devices.get(link.info.id).key || !link.info.ble_paired) && !prompted.has(link));
+      if ((cfg.usb.autoPair && !devices.size) || upgrade) {
+        pairUsb(undefined, upgrade || undefined).catch(error => log('USB pairing failed', error.message));
       }
     }, 1000).unref();
     setInterval(() => {
@@ -520,11 +555,12 @@ async function ensureDaemon() {
   try { await call('GET', '/status', null, 800); return true; } catch (_) { /* start it */ }
   spawnDaemon();
   // Give the paired board time to reconnect on the first request after startup.
+  const hasBluetoothPairing = [...registeredDevices(loadConfig()).values()].some(device => device.key);
   for (let i = 0; i < 25; i++) {
     await new Promise(r => setTimeout(r, 200));
     try {
       const s = await call('GET', '/status', null, 500);
-      if (s.devices.length || (i > 15 && !loadConfig().bluetooth.key) || i === 24) return true;
+      if (s.devices.length || (i > 15 && !hasBluetoothPairing) || i === 24) return true;
     } catch (_) { /* not yet */ }
   }
   return false;
@@ -555,14 +591,14 @@ async function preparePairing(autoSetup = false) {
 }
 
 async function setupUsb() {
-  if (!loadConfig().usb.pairedDeviceId) savePairingConfig({ enabled: true, autoPair: true });
+  if (!registeredDevices(loadConfig()).size) savePairingConfig({ enabled: true, autoPair: true });
   await preparePairing(true);
-  console.log('插入已烧录的设备，出现配对卡片后按最右侧键同意。');
+  console.log('插入已烧录的设备，出现配对卡片后按屏幕提示同意。');
 }
 
 async function pairDevice() {
   await preparePairing();
-  console.log('请连接一台已烧录 AgentReminder 的 USB 设备。出现配对卡片后，按右键同意。');
+  console.log('请连接一台已烧录 AgentReminder 的 USB 设备。出现配对卡片后，按屏幕提示同意。');
   let result;
   for (let attempt = 0; attempt < 40; attempt++) {
     result = await call('POST', '/pair', {}, 65000);

@@ -27,7 +27,7 @@ The host ignores any line that is not JSON, such as boot logs. A link only count
 
 | t | Fields | Meaning |
 |---|---|---|
-| `hello` | `app:"agentreminder", fw, id, link, ip?, ble?, ble_paired?` | Handshake reply. `ble:1` indicates USB enrollment support. |
+| `hello` | `app:"agentreminder", fw, id, link, ip?, ble?, ble_paired?, board?, sound?, orientation?` | Handshake reply. `ble:1` indicates USB enrollment support. AI Passport reports `board:"folotoy-passport"`, its sound setting and its screen orientation. |
 | `pong` | `ts` | Heartbeat reply |
 | `decision` | `id, decision(allow/deny/skip)` | User choice. `skip` = hand it back to the agent's own terminal prompt |
 | `log` | `msg` | Debug output, written to the daemon log |
@@ -43,7 +43,7 @@ Each frame starts with a two-byte big-endian payload length. The host and device
 
 - `POST /approval {timeoutSec, info}` → long-polls until it returns `{decision: "allow"|"deny"|null, reason}`
 - `POST /notify {info}` → `{delivered: n}`
-- `POST /pair {}` → asks the sole connected USB device for confirmation. On macOS, the supported firmware also stores a Bluetooth enrollment key after confirmation. Ordinary cards and decisions are restricted to the enrolled USB device and its authenticated Bluetooth link.
+- `POST /pair {}` → asks one connected USB device for confirmation, preferring an unpaired device when there is exactly one. On macOS, compatible firmware stores a Bluetooth enrollment key after confirmation. The daemon retains earlier board enrollments. Ordinary cards and decisions are restricted to registered USB devices and their authenticated Bluetooth links once at least one device is paired. The daemon broadcasts the first resolution to every ready link.
 - `GET /status`, `POST /raw` (broadcast as-is), `POST /shutdown`
 
 `decision: null` (no device, timeout, or the user tapped "终端") makes the hook print nothing, so the agent falls back to its normal approval flow.

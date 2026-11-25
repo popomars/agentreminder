@@ -9,6 +9,11 @@
 
 namespace {
 constexpr size_t nonceSize = 16, tagSize = 16, keySize = 32, maxMessage = 16384;
+#ifdef AGENTREMINDER_PASSPORT
+constexpr unsigned queueDepth = 16;
+#else
+constexpr unsigned queueDepth = 32;
+#endif
 constexpr uint16_t noConnection = UINT16_MAX;
 const char *rxUuid = "B623A0C1-5E48-46D3-BA39-000000000000";
 const char *txUuid = "B623A0C2-5E48-46D3-BA39-000000000000";
@@ -77,7 +82,7 @@ void advertise() {
 
 void start() {
   if (server) return;
-  events = xQueueCreate(32, sizeof(Event));
+  events = xQueueCreate(queueDepth, sizeof(Event));
   if (!events) return;
   BLEDevice::init("AgentReminder");
   BLEDevice::setCustomGattsHandler([](esp_gatts_cb_event_t event, esp_gatt_if_t iface, esp_ble_gatts_cb_param_t *) {
@@ -186,7 +191,7 @@ bool ble_paired() { return paired; }
 void ble_poll() {
   if (!server) return;
   Event event;
-  unsigned budget = 32;
+  unsigned budget = queueDepth;
   while (budget-- && xQueueReceive(events, &event, 0) == pdTRUE) {
     if (event.type == connected) {
       if (connection != noConnection) { server->disconnect(event.connection); continue; }

@@ -18,7 +18,7 @@ void sendDecision(const Item &it, const char *decision);
 
 void ui_init();
 void ui_loop();
-void ui_add_approval(const Item &it);
+void ui_add_approval(const Item &it, bool audible = true);
 void ui_add_notify(const Item &it);
 void ui_remove(const String &id);
 void ui_set_connected_host(uint8_t channel, const String &host);
@@ -26,3 +26,6 @@ const String &ui_connected_host(uint8_t channel);
 void ui_remove_channel(uint8_t channel);
 
 bool ui_font_ok();
+#ifdef AGENTREMINDER_PASSPORT
+bool ui_passport_landscape();
+#endif
