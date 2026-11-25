@@ -87,7 +87,7 @@ AGENTREMINDER_TEST_SESSION_ID=<current-session-id> node host/tools/hardware-chec
 PLATFORMIO_CORE_DIR="$PWD/.platformio" .venv/bin/pio run -d firmware
 ```
 
-Before flashing, stop the daemon to release the USB port; restart it afterwards.
+The flash script releases the USB port and restarts the local daemon if it was running.
 Keep `.venv/`, `.platformio/`, `.runtime/` and firmware `.pio/` out of plugin
 packages/repositories. Font regeneration and licensing are in `firmware/src/fonts`.
 
@@ -101,8 +101,11 @@ packages/repositories. Font regeneration and licensing are in `firmware/src/font
 
 ## USB install and precompiled images
 
-Host v0.3.1 installs hooks before USB enrollment and keeps the daemon waiting
-for a device. The first recognized device displays a confirmation card.
-Firmware v0.2.0 is checked into `firmware/release/waveshare-amoled-2.16`.
-Run `bash flash.sh --check` to check the four images, or `bash flash.sh` to write
-them with the same offsets used by PlatformIO.
+Host v0.4.3 and firmware v0.3.4 are bundled together. `bash install.sh --flash`
+verifies the images, flashes the board, installs hooks, and enables USB pairing.
+The board shows a confirmation card when a new host requests enrollment.
+Run `bash flash.sh --check` to verify the four images, or `bash flash.sh` to
+write them with the same offsets used by PlatformIO.
+
+The current board passed the two-choice test with the right physical button and
+returned the next request to the computer on a short center PWR press.

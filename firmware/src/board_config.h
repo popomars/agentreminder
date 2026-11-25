@@ -24,8 +24,27 @@ class BoardDisplay {
   Arduino_ESP32QSPI bus{12, 38, 4, 5, 6, 7};
   Arduino_CO5300 panel{&bus, 39, 0, TFT_W, TFT_H, 0, 0, 0, 0};
   TouchDrvCST92xx touch;
-  bool touchReady = false, pressed = false;
+  bool touchReady = false, pressed = false, powerKeyReady = false;
   uint16_t lastX = 0, lastY = 0;
+  uint32_t lastPowerPoll = 0;
+
+  // AXP2101 PEK IRQ register group 1, short-press bit. The status bit is W1C.
+  static constexpr uint8_t pmicAddress = 0x34;
+  static constexpr uint8_t keyIrqEnable = 0x41, keyIrqStatus = 0x49, shortPress = 1 << 3;
+
+  static int readPmic(uint8_t reg) {
+    Wire.beginTransmission(pmicAddress);
+    Wire.write(reg);
+    if (Wire.endTransmission(false) != 0 || Wire.requestFrom(pmicAddress, uint8_t(1)) != 1) return -1;
+    return Wire.read();
+  }
+
+  static bool writePmic(uint8_t reg, uint8_t value) {
+    Wire.beginTransmission(pmicAddress);
+    Wire.write(reg);
+    Wire.write(value);
+    return Wire.endTransmission() == 0;
+  }
 public:
   void init() {
     touch.setPins(TP_RST, TP_INT);
@@ -35,6 +54,12 @@ public:
       touch.setSwapXY(true);
       touch.setMirrorXY(true, false);
     }
+    const int keyInterrupts = readPmic(keyIrqEnable);
+    if (keyInterrupts >= 0) {
+      powerKeyReady = ((keyInterrupts & shortPress) || writePmic(keyIrqEnable, keyInterrupts | shortPress)) &&
+        writePmic(keyIrqStatus, shortPress);
+    }
+    Serial.printf("{\"t\":\"log\",\"msg\":\"AXP2101 PWR short press %s\"}\n", powerKeyReady ? "ready" : "unavailable");
     pinMode(TP_INT, INPUT_PULLUP);
     attachInterrupt(digitalPinToInterrupt(TP_INT), boardTouchInterrupt, FALLING);
     Serial.printf("{\"t\":\"log\",\"msg\":\"CST9220 touch %s\"}\n", touchReady ? "ready" : "FAILED");
@@ -44,6 +69,13 @@ public:
   }
   int width() { return TFT_W; }
   int height() { return TFT_H; }
+  bool pollPowerKey() {
+    const uint32_t now = millis();
+    if (!powerKeyReady || now - lastPowerPoll < 24) return false;
+    lastPowerPoll = now;
+    const int interrupts = readPmic(keyIrqStatus);
+    return interrupts >= 0 && (interrupts & shortPress) && writePmic(keyIrqStatus, shortPress);
+  }
   void setBrightness(uint8_t value) { panel.setBrightness(value); }
   void draw(int x, int y, int w, int h, uint16_t *pixels) {
     panel.draw16bitRGBBitmap(x, y, pixels, w, h);

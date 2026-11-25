@@ -63,7 +63,7 @@ Set `approvalTimeoutSec` in `~/.agentreminder/config.json` to change the wait. F
 
 ### Questions and other input
 
-For a single two-option question, use the two on-screen choices or the matching physical buttons. The **Continue on computer** control is also available. Requests with more choices, multiple questions, text fields or authentication show a reminder on the board and can be completed on the computer. For secret fields, the board only shows a handoff reminder. Approvals and live input requests share the pending queue.
+For a single two-option question, use the two on-screen choices or the matching physical buttons. Briefly press the center **PWR** key or tap **Continue on computer** to hand it back. A short PWR press on an approval card also defers to the computer. Requests with more choices, multiple questions, text fields or authentication show a reminder on the board and can be completed on the computer. For secret fields, the board only shows a handoff reminder. Approvals and live input requests share the pending queue.
 
 Codex Desktop uses the desktop bridge for native questions, MCP forms and permission requests that need desktop review. Reopen Codex to load the updated bridge. Claude Code uses `AskUserQuestion`, plus the `Elicitation` hook in Claude Code 2.1.76 or newer. Use Claude Code 2.1.76 or newer for the plugin package. For a two-option prompt, Claude waits for the device answer or handoff. Other prompts open on the computer. dsh can display reminders from its configured bridge and answers remain in dsh. Managed cloud interactions need an event source that connects to the local hooks or bridge.
 

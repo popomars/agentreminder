@@ -212,7 +212,7 @@ static void buildApproval() {
       button(choices, it.leftChoice.c_str(), 0x365578, "deny", 68, true);
       button(choices, it.rightChoice.c_str(), 0x365578, "allow", 68, true);
     }
-    button(buttonRow(), "回电脑上继续", 0x555555, "skip", 50, true);
+    button(buttonRow(), "中键 · 回电脑上继续", 0x555555, "skip", 50, true);
   } else {
     auto *btns = buttonRow();
     button(btns, "拒绝", 0xC0392B, "deny");
@@ -345,7 +345,11 @@ void ui_loop() {
   const String activeId = approvals.empty() || (approvals.front().interaction && !hasChoices(approvals.front()))
     ? "" : approvals.front().id;
   const bool denied = denyKey.poll(activeId), allowed = allowKey.poll(activeId);
-  if (denied) decide("deny", BUTTON_DENY_PIN);
+  const bool handoff = lcd.pollPowerKey();
+  if (handoff && !approvals.empty()) {
+    Serial.printf("{\"t\":\"log\",\"msg\":\"approval %s physical PWR -> skip\"}\n", approvals.front().id.c_str());
+    decide("skip");
+  } else if (denied) decide("deny", BUTTON_DENY_PIN);
   else if (allowed) decide("allow", BUTTON_ALLOW_PIN);
   if (dirty) rebuild();
   if (dimAt && millis() > dimAt && approvals.empty()) { lcd.setBrightness(30); dimAt = 0; }

@@ -7,7 +7,7 @@
 #include "ui.h"
 #include "ble_transport.h"
 
-#define FW_VERSION "0.3.3"
+#define FW_VERSION "0.3.4"
 #define TCP_PORT 47322
 #define HOSTNAME "agentreminder"
 
