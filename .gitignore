@@ -1,0 +1,47 @@
+# Operating systems
+.DS_Store
+Thumbs.db
+
+# Editors and IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Environment and secrets
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# Dependencies and virtual environments
+node_modules/
+.venv/
+venv/
+
+# Build and test output
+dist/
+build/
+coverage/
+.coverage
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+__pycache__/
+*.py[cod]
+
+# Logs and temporary files
+*.log
+tmp/
+temp/
+*.tmp
+
+# Language and tool-specific local state
+.next/
+.nuxt/
+.turbo/
+target/
+*.tsbuildinfo
+
+# Keep project-specific additions below this line.
