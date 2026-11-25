@@ -37,8 +37,14 @@ PY
 if "$check"; then exit 0; fi
 
 env_dir="${AGENTREMINDER_HOME:-"$HOME/.agentreminder"}/flash/esptool-4.9.0"
-if [[ ! -x "$env_dir/bin/python" ]]; then python3 -m venv "$env_dir"; fi
-python="$env_dir/bin/python"
+python="${AGENTREMINDER_FLASH_PYTHON:-"$env_dir/bin/python"}"
+if [[ ! -x "$python" ]]; then
+  if [[ -n ${AGENTREMINDER_FLASH_PYTHON:-} ]]; then
+    echo "找不到指定的 Python：$python" >&2
+    exit 1
+  fi
+  python3 -m venv "$env_dir"
+fi
 if ! "$python" -c 'import esptool, serial; assert esptool.__version__ == "4.9.0"' 2>/dev/null; then
   "$python" -m pip install 'esptool==4.9.0'
 fi

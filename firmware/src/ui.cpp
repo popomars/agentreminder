@@ -13,7 +13,7 @@ static lv_obj_t *statusLbl, *content, *toast;
 static bool dirty = true;
 static uint32_t toastUntil = 0, dimAt = 0;
 
-LV_FONT_DECLARE(agentreminder_cjk_18);
+LV_FONT_DECLARE(agentreminder_cjk_26);
 static lv_font_t fontCn;
 static bool fontReady = false;
 bool ui_font_ok() { return fontReady; }
@@ -110,7 +110,7 @@ static void onDismiss(lv_event_t *e) {
 static lv_obj_t *button(lv_obj_t *parent, const char *txt, uint32_t color, const char *decision, int grow) {
   lv_obj_t *b = lv_button_create(parent);
   lv_obj_set_flex_grow(b, grow);
-  lv_obj_set_height(b, 66);
+  lv_obj_set_height(b, 76);
   lv_obj_set_style_bg_color(b, lv_color_hex(color), 0);
   lv_obj_set_style_radius(b, 10, 0);
   lv_obj_add_event_cb(b, onDecision, LV_EVENT_CLICKED, (void *)decision);
@@ -126,43 +126,49 @@ static void buildApproval() {
   Serial.printf("{\"t\":\"log\",\"msg\":\"render approval %s\"}\n", it.id.c_str());
   lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
 
-  label(content, it.conversation, lv_color_white());
+  const String headline = it.reason.length() ? it.reason : it.title;
+  lv_obj_t *subject = label(content, headline, lv_color_hex(0xFFD369));
+  lv_label_set_long_mode(subject, LV_LABEL_LONG_DOT);
+  lv_obj_set_style_max_height(subject, 102, 0);
 
   lv_obj_t *row = lv_obj_create(content);
   lv_obj_remove_style_all(row);
   lv_obj_set_size(row, lv_pct(100), LV_SIZE_CONTENT);
   lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-  lv_obj_set_style_pad_column(row, 6, 0);
+  lv_obj_set_style_pad_column(row, 8, 0);
   lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
   chip(row, it.agent);
-  String hdr = it.project;
-  if (approvals.size() > 1) hdr += "   (1/" + String(approvals.size()) + ")";
-  label(row, hdr, lv_color_hex(0xBBBBBB), false);
-
-  label(content, String(LV_SYMBOL_WARNING " 需要审批: ") + it.title, lv_color_hex(0xFFC857));
+  lv_obj_t *conversation = label(row, it.conversation, lv_color_hex(0xD2D2D2), false);
+  lv_obj_set_flex_grow(conversation, 1);
+  lv_label_set_long_mode(conversation, LV_LABEL_LONG_DOT);
 
   lv_obj_t *box = lv_obj_create(content);
   lv_obj_set_width(box, lv_pct(100));
   lv_obj_set_flex_grow(box, 1);
   lv_obj_set_style_bg_color(box, lv_color_hex(0x1E1E1E), 0);
+  lv_obj_set_style_bg_opa(box, LV_OPA_TRANSP, 0);
   lv_obj_set_style_border_width(box, 0, 0);
-  lv_obj_set_style_pad_all(box, 8, 0);
-  label(box, (it.reason.length() ? it.reason + "\n\n" : "") + it.detail, lv_color_hex(0xE6E6E6));
+  lv_obj_set_style_pad_all(box, 2, 0);
+  lv_obj_add_flag(box, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_scroll_dir(box, LV_DIR_VER);
+  if (it.detail.length() && it.detail != headline) {
+    label(box, it.detail, lv_color_hex(0xF0F0F0));
+  }
 
   lv_obj_t *btns = lv_obj_create(content);
   lv_obj_remove_style_all(btns);
   lv_obj_set_size(btns, lv_pct(100), LV_SIZE_CONTENT);
   lv_obj_set_flex_flow(btns, LV_FLEX_FLOW_ROW);
   lv_obj_set_style_pad_column(btns, 8, 0);
-  button(btns, "左键 · 拒绝", 0xC0392B, "deny", 2);
+  button(btns, "拒绝", 0xC0392B, "deny", 2);
   button(btns, "终端", 0x555555, "skip", 1);
-  button(btns, "右键 · 同意", 0x27AE60, "allow", 2);
+  button(btns, "同意", 0x27AE60, "allow", 2);
 }
 
 static void buildNotes() {
   lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
   if (notes.empty()) {
-    lv_obj_t *l = label(content, LV_SYMBOL_OK "  一切就绪\n等待 agent 消息…", lv_color_hex(0x777777));
+    lv_obj_t *l = label(content, LV_SYMBOL_OK "  一切就绪\n等待 agent 消息…", lv_color_hex(0xC7C7C7));
     lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
     return;
   }
@@ -179,7 +185,7 @@ static void buildNotes() {
     lv_obj_add_event_cb(card, onDismiss, LV_EVENT_CLICKED, (void *)(uintptr_t)i);
     const char *icon = n.kind == "done" ? LV_SYMBOL_OK " " : n.kind == "idle" ? LV_SYMBOL_BELL " " : LV_SYMBOL_BELL " ";
     label(card, String(icon) + n.agent + " · " + n.conversation + "  " + n.title, lv_color_white());
-    if (n.detail.length()) label(card, n.detail, lv_color_hex(0xAAAAAA));
+    if (n.detail.length()) label(card, n.detail, lv_color_hex(0xD2D2D2));
   }
 }
 
@@ -204,10 +210,10 @@ void ui_init() {
   wake();
   lv_init();
   lv_tick_set_cb([]() -> uint32_t { return millis(); });
-  fontCn = agentreminder_cjk_18;
-  fontCn.fallback = &lv_font_montserrat_16;
-  fontCn.line_height = 24;
-  fontCn.base_line = 5;
+  fontCn = agentreminder_cjk_26;
+  fontCn.fallback = &lv_font_montserrat_22;
+  fontCn.line_height = 34;
+  fontCn.base_line = 8;
   fontReady = true;
   // Exercise the actual LVGL bitmap decoder, not just font character coverage.
   for (uint32_t cp : {0x41U, 0x5BA1U, 0x6279U, 0x62D2U, 0x7EDDU, 0x00B7U, 0x2192U}) {
@@ -246,8 +252,8 @@ void ui_init() {
   lv_obj_set_style_pad_all(scr, 22, 0);
   lv_obj_set_style_pad_row(scr, 6, 0);
 
-  statusLbl = label(scr, "AgentReminder", lv_color_hex(0x888888));
-  lv_obj_set_style_text_font(statusLbl, &lv_font_montserrat_14, 0);
+  statusLbl = label(scr, "AgentReminder", lv_color_hex(0xC7C7C7));
+  lv_obj_set_style_text_font(statusLbl, &lv_font_montserrat_22, 0);
 
   content = lv_obj_create(scr);
   lv_obj_remove_style_all(content);
