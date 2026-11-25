@@ -24,7 +24,7 @@ const crypto = require('crypto');
 const { spawn, execFileSync } = require('child_process');
 const bluetooth = require('./bluetooth');
 
-const VERSION = '0.4.2';
+const VERSION = '0.4.3';
 const HOME_DIR = process.env.AGENTREMINDER_HOME || path.join(os.homedir(), '.agentreminder');
 const CONFIG_PATH = path.join(HOME_DIR, 'config.json');
 const LOG_PATH = path.join(HOME_DIR, 'daemon.log');
@@ -120,6 +120,7 @@ class Hub {
       : !paired || (l.kind === 'usb' && l.info.id === paired));
   }
   broadcast(obj) { for (const l of this.readyLinks()) l.send(obj); }
+  requestLinks(payload) { return this.readyLinks().filter(link => !payload.interaction || link.info.interaction === true); }
 
   add(link) {
     this.links.add(link);
@@ -136,7 +137,7 @@ class Hub {
     this.links.delete(link);
     log('link closed', link.kind, link.name);
     for (const [id, pending] of this.pending) {
-      if (pending.target ? pending.target === link : !this.readyLinks().length) this.cancel(id, 'device-disconnected');
+      if (pending.target ? pending.target === link : !this.requestLinks(pending.payload).length) this.cancel(id, 'device-disconnected');
     }
   }
   onMessage(link, msg) {
@@ -152,16 +153,20 @@ class Hub {
         log('device ready', link.kind, link.name, msg);
         if (this.readyLinks().includes(link)) {
           for (const p of this.pending.values()) {
-            if (!p.target) link.send({ ...p.payload, timeout: Math.max(1, Math.ceil((p.deadline - Date.now()) / 1000)) });
+            if (!p.target && this.requestLinks(p.payload).includes(link)) {
+              link.send({ ...p.payload, timeout: Math.max(1, Math.ceil((p.deadline - Date.now()) / 1000)) });
+            }
           }
         }
         break;
-      case 'decision':
-        if (link.ready && this.pending.has(msg.id) &&
-            (this.pending.get(msg.id).target ? this.pending.get(msg.id).target === link : this.readyLinks().includes(link)) &&
+      case 'decision': {
+        const pending = this.pending.get(msg.id);
+        if (link.ready && pending && (pending.target ? pending.target === link : this.requestLinks(pending.payload).includes(link)) &&
+            (!pending.payload.interaction || pending.payload.choices?.length === 2 || msg.decision === 'skip') &&
             ['allow', 'deny', 'skip'].includes(msg.decision))
           this.resolve(msg.id, msg.decision, `${link.kind}:${link.name}`, msg.ble_paired === true);
         break;
+      }
       case 'pong': case 'ack': break;
       case 'log': log('device:', msg.msg); break;
       default: log('unknown msg', msg);
@@ -171,7 +176,11 @@ class Hub {
   /** Ask connected devices. promise -> { decision: 'allow'|'deny'|null } (null = let the agent ask normally). */
   requestApproval(info, timeoutMs, target = null, enrollmentKey = null) {
     const id = crypto.randomUUID();
-    if (target ? !target.ready || target.closed : this.readyLinks().length === 0) {
+    const links = target ? [target] : this.requestLinks(info);
+    if (!links.length || (target && (!target.ready || target.closed))) {
+      if (info.interaction && this.readyLinks().length) {
+        this.notify({ ...info, kind: 'input' });
+      }
       return { id, promise: Promise.resolve({ decision: null, reason: 'no-device' }) };
     }
     const promise = new Promise(resolve => {
@@ -181,8 +190,7 @@ class Hub {
       const timer = setTimeout(() => this.resolve(id, null, 'timeout'), timeoutMs);
       this.pending.set(id, { payload, resolve, timer, target, deadline: Date.now() + timeoutMs });
       if (enrollmentKey) target.send({ ...payload, t: 'ble-pair', key: enrollmentKey });
-      else if (target) target.send(payload);
-      else this.broadcast(payload);
+      else for (const link of links) link.send(payload);
       log('approval ->', id, info.agent, info.title);
     });
     return { id, promise };
@@ -209,9 +217,14 @@ class Hub {
   }
   notify(info) {
     const payload = { ...info, host: info.host || hostName, t: 'notify', id: crypto.randomUUID(), ts: Date.now() };
-    this.broadcast(payload);
-    log('notify ->', info.agent, info.kind, info.title);
-    return this.readyLinks().length;
+    const links = this.readyLinks();
+    for (const link of links) {
+      if (info.kind === 'input' && info.reason && link.info.interaction !== true) {
+        link.send({ ...payload, title: clip(`${info.title} · ${info.reason}`, 240), reason: '' });
+      } else link.send(payload);
+    }
+    log('notify ->', info.agent, info.kind, info.kind === 'input' ? 'awaiting input' : info.title);
+    return links.length;
   }
 }
 
@@ -392,12 +405,12 @@ function runDaemon() {
         const result = await pairUsb(res);
         return reply(result.deviceId ? 200 : 409, result);
       }
-      if (req.url === '/approval') {
+      if (req.url === '/approval' || req.url === '/interaction') {
         if ([...hub.pending.values()].some(pending => pending.target)) {
           return reply(200, { decision: null, reason: 'pairing-in-progress' });
         }
         const timeoutMs = Math.max(5, Math.min(body.timeoutSec || cfg.approvalTimeoutSec, 3600)) * 1000;
-        const { id, promise } = hub.requestApproval(body.info || {}, timeoutMs);
+        const { id, promise } = hub.requestApproval({ ...body.info, interaction: req.url === '/interaction' }, timeoutMs);
         // If the hook process dies (agent cancelled / user hit Esc), clear the card on the device.
         res.on('close', () => { if (!res.writableEnded) hub.cancel(id, 'hook-gone'); });
         return reply(200, await promise);
@@ -649,6 +662,46 @@ function describeTool(input) {
   return { title: name, detail: clip(detail, 900), reason: clip(reason, 300) };
 }
 
+function questionCard(questions, canAnswer = true) {
+  const list = Array.isArray(questions) ? questions.filter(q => q && typeof q.question === 'string') : [];
+  const first = list[0];
+  const options = Array.isArray(first?.options) ? first.options.map(option => option?.label) : [];
+  const choices = canAnswer && list.length === 1 && questions.length === 1 && !first.isOther && !first.isSecret && !first.multiSelect &&
+    options.length === 2 && options.every(label => typeof label === 'string' && label.trim()) && options[0] !== options[1]
+    ? options : null;
+  const reason = list.map(q => {
+    if (q.isSecret) return '请在电脑上安全输入答案。';
+    const labels = Array.isArray(q.options) ? q.options.filter(option => typeof option?.label === 'string') : [];
+    return [q.question, ...labels.map((option, index) => `${index + 1}. ${option.label}${option.description ? ` · ${option.description}` : ''}`)].join('\n');
+  }).join('\n\n');
+  return { card: { title: '等待回答', reason: clip(reason || '请在电脑上查看问题。', 1200), interaction: true,
+    ...(choices ? { choices: choices.map(label => clip(label, 80)) } : {}) }, question: first, choices };
+}
+
+function formCard(mode, message, schema) {
+  const card = { title: '等待填写', interaction: true,
+    reason: mode === 'url' ? '请在电脑上打开浏览器完成验证。' : clip(message || '请在电脑上查看表单。', 700) };
+  if (mode !== 'form' || schema?.type !== 'object' || !schema.properties) return { card };
+  const fields = Object.entries(schema.properties);
+  const details = fields.map(([name, field]) => `${field?.title || name}${field?.description ? ` · ${field.description}` : ''}`);
+  card.reason = clip([card.reason, ...details].join('\n'), 900);
+  if (fields.length !== 1) return { card };
+  const [name, field] = fields[0];
+  if (Array.isArray(schema.required) && schema.required.some(required => required !== name)) return { card };
+  // Only an ordinary boolean or a two-value enum can be reproduced without a desktop form.
+  const titled = Array.isArray(field?.oneOf) ? field.oneOf : [];
+  const binaryBoolean = field?.type === 'boolean';
+  const values = binaryBoolean ? [false, true] : field?.type === 'string' ? (field.enum || titled.map(option => option?.const)) : null;
+  if (!Array.isArray(values) || values.length !== 2 || values[0] === values[1] ||
+      !values.every(value => binaryBoolean || (typeof value === 'string' && value.trim()))) return { card };
+  const labels = binaryBoolean ? ['否', '是'] : values.map((value, index) =>
+    String(field.enum ? field.enumNames?.[index] || value : titled[index]?.title || value));
+  if (!labels.every(label => label.trim()) || labels[0] === labels[1]) return { card };
+  card.choices = labels.map(label => clip(label, 80));
+  card.reason = clip(`${card.reason}\n1. ${labels[0]}\n2. ${labels[1]}`, 1000);
+  return { card, content: decision => ({ [name]: values[decision === 'allow' ? 1 : 0] }) };
+}
+
 function arg(argv, name, def) {
   const i = argv.indexOf('--' + name);
   return i >= 0 && argv[i + 1] ? argv[i + 1] : def;
@@ -667,6 +720,27 @@ async function runHook(argv) {
   const out = (obj) => { if (obj) process.stdout.write(JSON.stringify(obj)); };
 
   try {
+    if (event === 'question' || event === 'elicitation') {
+      if (!(await ensureDaemon())) return;
+      const form = event === 'elicitation';
+      const request = form ? formCard(input.mode, input.message, input.requested_schema) :
+        questionCard(input.tool_input?.questions, agent === 'claude');
+      if (!form && input.tool_input?.answers && Object.keys(input.tool_input.answers).length) return;
+      const info = { agent, ...session, ...request.card };
+      if (!info.choices) {
+        await call('POST', '/notify', { info: { ...info, kind: 'input' } }, 3000);
+        return;
+      }
+      const timeoutSec = cfg.approvalTimeoutSec;
+      const { decision } = await call('POST', '/interaction', { timeoutSec, info }, (timeoutSec + 10) * 1000);
+      if (!decision) return;
+      if (form) out({ hookSpecificOutput: { hookEventName: 'Elicitation', action: 'accept', content: request.content(decision) } });
+      else out({ hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow', updatedInput: {
+        ...input.tool_input, answers: { [request.question.question]: request.choices[decision === 'allow' ? 1 : 0] },
+      } } });
+      return;
+    }
+
     if (event === 'permission' || event === 'pretool') {
       if (!(await ensureDaemon())) return;
       const { title, detail, reason } = describeTool(input);
@@ -696,8 +770,10 @@ async function runHook(argv) {
       if (type === 'permission_prompt') return;        // covered by PermissionRequest
       if (!cfg.notify.idle) return;
       if (!(await ensureDaemon())) return;
-      await call('POST', '/notify', { info: { agent, ...session, kind: type === 'idle_prompt' ? 'idle' : 'info',
-        title: type === 'idle_prompt' ? '等待你的输入' : (input.title || '通知'), detail: clip(input.message || '', 400) } }, 3000);
+      const needsInput = ['agent_needs_input', 'elicitation_dialog', 'elicitation_url_dialog', 'auth_storage_failure', 'quota_auto_resume_disabled'].includes(type);
+      const detail = type === 'elicitation_url_dialog' ? '请在电脑上打开浏览器完成验证。' : clip(input.message || '', 400);
+      await call('POST', '/notify', { info: { agent, ...session, kind: needsInput ? 'input' : type === 'idle_prompt' ? 'idle' : 'info',
+        title: type === 'idle_prompt' ? '等待你的输入' : (input.title || '通知'), detail, ...(needsInput ? { reason: detail } : {}) } }, 3000);
     }
   } catch (e) {
     log('hook error', agent, event, e.message);       // never break the agent
@@ -713,7 +789,8 @@ function mergeHooks(file, hooks) {
   cur.hooks = cur.hooks || {};
   for (const [ev, groups] of Object.entries(hooks)) {
     const keep = (cur.hooks[ev] || []).filter(g => !JSON.stringify(g).includes('agentreminder.js'));
-    cur.hooks[ev] = [...keep, ...groups];
+    if (keep.length || groups.length) cur.hooks[ev] = [...keep, ...groups];
+    else delete cur.hooks[ev];
   }
   fs.mkdirSync(path.dirname(file), { recursive: true });
   if (fs.existsSync(file)) fs.copyFileSync(file, file + '.bak');
@@ -730,6 +807,16 @@ const hookSettings = {
   dsh: path.join(HOME_DIR, 'dsh-hooks.json'),
 };
 
+function claudeElicitationSupported() {
+  try {
+    const output = execFileSync('claude', ['--version'], { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] });
+    const version = output.match(/^(\d+)\.(\d+)\.(\d+)/);
+    if (!version) return false;
+    const [, major, minor, patch] = version.map(Number);
+    return major > 2 || (major === 2 && (minor > 1 || (minor === 1 && patch >= 76)));
+  } catch (_) { return false; }
+}
+
 function install(target) {
   const t = (cfg) => ({ type: 'command', command: cfg.cmd, timeout: cfg.timeout });
   const appr = loadConfig().approvalTimeoutSec + 30;
@@ -742,14 +829,21 @@ function install(target) {
   } else if (target === 'dsh') {
     const f = mergeHooks(hookSettings.dsh, {
       PreToolUse: [{ matcher: loadConfig().dshMatcher || 'bash|shell|write|edit|apply_patch|Bash|Shell|Write|Edit|MultiEdit',
-        hooks: [t({ cmd: hookCmd('dsh', 'pretool'), timeout: appr })] }],
+        hooks: [t({ cmd: hookCmd('dsh', 'pretool'), timeout: appr })] },
+        { matcher: 'AskUserQuestion|ask_user_question', hooks: [t({ cmd: hookCmd('dsh', 'question'), timeout: 10 })] }],
+      Notification: [{ matcher: 'agent_needs_input|elicitation_dialog|elicitation_url_dialog', hooks: [t({ cmd: hookCmd('dsh', 'notification'), timeout: 10 })] }],
       Stop: [{ hooks: [t({ cmd: hookCmd('dsh', 'stop'), timeout: 10 })] }],
     });
     console.log(`已写入 ${f}\n把 integrations/dsh/cordis.patch.yml 里的 configPath 指向它（见 README）。`);
   } else if (target === 'claude') {
+    const elicitation = claudeElicitationSupported();
+    const notifications = 'idle_prompt|agent_needs_input|auth_storage_failure|quota_auto_resume_disabled';
     const f = mergeHooks(hookSettings.claude, {
       PermissionRequest: [{ hooks: [t({ cmd: hookCmd('claude', 'permission'), timeout: appr })] }],
-      Notification: [{ hooks: [t({ cmd: hookCmd('claude', 'notification'), timeout: 10 })] }],
+      PreToolUse: [{ matcher: 'AskUserQuestion', hooks: [t({ cmd: hookCmd('claude', 'question'), timeout: appr })] }],
+      Elicitation: elicitation ? [{ hooks: [t({ cmd: hookCmd('claude', 'elicitation'), timeout: appr })] }] : [],
+      Notification: [{ matcher: elicitation ? notifications : `${notifications}|elicitation_dialog|elicitation_url_dialog`,
+        hooks: [t({ cmd: hookCmd('claude', 'notification'), timeout: 10 })] }],
       Stop: [{ hooks: [t({ cmd: hookCmd('claude', 'stop'), timeout: 10 })] }],
     });
     console.log(`已写入 ${f}（推荐改用插件方式安装，见 README）`);
@@ -813,4 +907,4 @@ if (require.main === module) {
   main().catch(e => { console.error(e.message); process.exitCode = 1; });
 }
 
-module.exports = { Hub, Link, mergeHooks, describeTool, describeSession, transcriptTitle, shellQuote, call, ensureDaemon, stopLocalDaemon, loadConfig, HOME_DIR, hookSettings };
+module.exports = { Hub, Link, mergeHooks, describeTool, describeSession, transcriptTitle, questionCard, formCard, shellQuote, call, ensureDaemon, stopLocalDaemon, loadConfig, HOME_DIR, hookSettings };

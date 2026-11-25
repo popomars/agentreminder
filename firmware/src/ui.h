@@ -6,8 +6,8 @@ enum : uint8_t { CH_USB = 1, CH_WIFI = 2, CH_BLE = 4 };
 constexpr uint32_t DEFAULT_APPROVAL_SECONDS = 300;
 
 struct Item {
-  String id, agent, conversation, reason, title, host, project;
-  bool completed = false;
+  String id, agent, conversation, reason, title, host, project, leftChoice, rightChoice;
+  bool completed = false, interaction = false;
   uint8_t channels = 0;
   uint32_t at = 0, timeoutMs = DEFAULT_APPROVAL_SECONDS * 1000UL;
 };

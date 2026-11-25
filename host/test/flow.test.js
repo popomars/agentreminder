@@ -32,7 +32,7 @@ test('real hook processes → daemon → TCP device → agent-compatible JSON', 
       buf += d; let i;
       while ((i = buf.indexOf('\n')) >= 0) {
         const m = JSON.parse(buf.slice(0, i)); buf = buf.slice(i + 1); received.push(m);
-        if (m.t === 'hello') sock.write('{"t":"hello","app":"agentreminder","id":"flow-test"}\n');
+        if (m.t === 'hello') sock.write('{"t":"hello","app":"agentreminder","id":"flow-test","interaction":true}\n');
         if (m.t === 'approval' && decision) sock.write(JSON.stringify({ t: 'decision', id: m.id, decision }) + '\n');
       }
     });
@@ -67,6 +67,21 @@ test('real hook processes → daemon → TCP device → agent-compatible JSON', 
     assert.equal(received.filter(m => m.t === 'notify').at(-1).host, relayHost);
   }
 
+  const question = { question: '请选择部署环境', options: [{ label: '预览' }, { label: '正式' }] };
+  decision = 'deny';
+  const answer = await hook('claude', 'question', { tool_input: { questions: [question] } });
+  assert.deepEqual(JSON.parse(answer).hookSpecificOutput.updatedInput.answers, { [question.question]: '预览' });
+  assert.deepEqual(received.filter(m => m.t === 'approval').at(-1).choices, ['预览', '正式']);
+  assert.equal(await hook('claude', 'question', { tool_input: { questions: [{ ...question, multiSelect: true }] } }), '');
+  assert.equal(received.filter(m => m.t === 'notify').at(-1).kind, 'input');
+  assert.equal(await hook('dsh', 'question', { tool_input: { questions: [question] } }), '');
+  assert.equal(received.filter(m => m.t === 'notify').at(-1).kind, 'input');
+  decision = 'allow';
+  const form = await hook('claude', 'elicitation', { mode: 'form', message: '继续吗？', requested_schema: {
+    type: 'object', properties: { proceed: { type: 'boolean' } },
+  } });
+  assert.deepEqual(JSON.parse(form).hookSpecificOutput.content, { proceed: true });
+
   // A simulated App Server gives the actual stdio wrapper and device daemon a shared request.
   const appServer = path.join(home, 'app-server-fixture');
   fs.writeFileSync(appServer, `#!${process.execPath}
@@ -77,6 +92,10 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   const message = JSON.parse(line);
   if (message.method === 'fixture/trigger') {
     send({ id: message.params.requestId, method: 'item/commandExecution/requestApproval', params: { reason: '双端测试' } });
+  } else if (message.method === 'fixture/trigger-question') {
+    send({ id: message.params.requestId, method: 'item/tool/requestUserInput', params: { questions: [{
+      id: 'environment', question: '请选择部署环境', options: [{ label: '预览' }, { label: '正式' }],
+    }] } });
   } else if (message.result) {
     send({ method: 'serverRequest/resolved', params: { requestId: message.id } });
     send({ method: 'fixture/received', params: message.result });
@@ -106,5 +125,9 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   send({ method: 'fixture/trigger', params: { requestId: 101 } });
   await until(() => desktop.some(m => m.method === 'serverRequest/resolved' && m.params.requestId === 101));
   assert(desktop.some(m => m.method === 'fixture/received' && m.params.decision === 'accept'));
+
+  send({ method: 'fixture/trigger-question', params: { requestId: 102 } });
+  await until(() => desktop.some(m => m.method === 'serverRequest/resolved' && m.params.requestId === 102));
+  assert(desktop.some(m => m.method === 'fixture/received' && m.params.answers?.environment?.answers[0] === '正式'));
   proxy.stdin.end();
 });

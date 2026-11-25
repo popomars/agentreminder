@@ -64,20 +64,57 @@ test('native cancellation aborts the matching card only; device skip leaves desk
   assert.equal(desktop.length, 3);
 });
 
-test('does not mirror unsupported decisions and does not intercept desktop requests with the same ID', () => {
+test('unsupported approval decisions are display-only; desktop requests keep their IDs', () => {
   const { bridge, server, device } = fixture();
   const body = JSON.parse(request());
   body.params.availableDecisions = ['decline', 'acceptForSession'];
   assert.equal(approvalCard(body), null);
   bridge.fromServer(JSON.stringify(body));
-  assert.equal(device.length, 0);
-  bridge.fromServer(request());
-  const clientRequest = JSON.stringify({ id: 7, method: 'thread/list', params: {} });
+  assert.equal(device.length, 1);
+  assert.equal(device[0].card.interaction, true);
+  assert.equal(device[0].card.choices, undefined);
+  bridge.fromServer(request(8));
+  const clientRequest = JSON.stringify({ id: 8, method: 'thread/list', params: {} });
   bridge.fromDesktop(clientRequest);
   assert.equal(server[0], clientRequest);
   assert.equal(device[0].signal.aborted, false);
   bridge.close();
   assert.equal(device[0].signal.aborted, true);
+  assert.equal(device[1].signal.aborted, true);
+});
+
+function questionRequest(options, extra = {}) {
+  return JSON.stringify({ id: 14, method: 'item/tool/requestUserInput', params: { threadId: 'thread', questions: [{
+    id: 'choice', question: '选择目标', options: options.map(label => ({ label })), ...extra,
+  }] } });
+}
+
+test('binary questions send exact labels in the native Codex answer', async () => {
+  const { bridge, server, device } = fixture();
+  bridge.fromServer(questionRequest(['第一项', '第二项']));
+  assert.deepEqual(device[0].card.choices, ['第一项', '第二项']);
+  device[0].resolve({ decision: 'allow' });
+  await nextTick();
+  assert.deepEqual(JSON.parse(server[0]), { id: 14, result: { answers: { choice: { answers: ['第二项'] } } } });
+  bridge.fromDesktop(JSON.stringify({ id: 14, result: {} }));
+  assert.equal(server.length, 1);
+});
+
+test('computer handoff, multiple options, and secret answers never submit a device answer', async () => {
+  for (const [options, extra, decision] of [
+    [['A', 'B'], {}, null], [['A', 'B', 'C'], {}, 'allow'],
+    [['A', 'B'], { isOther: true }, 'allow'], [['A', 'B'], { isSecret: true }, 'allow'],
+  ]) {
+    const { bridge, server, device } = fixture();
+    bridge.fromServer(questionRequest(options, extra));
+    if (decision) assert.equal(device[0].card.choices, undefined);
+    if (extra.isSecret) assert.doesNotMatch(device[0].card.reason, /选择目标/);
+    device[0].resolve({ decision });
+    await nextTick();
+    assert.equal(server.length, 0);
+    bridge.fromDesktop(JSON.stringify({ id: 14, result: { answers: {} } }));
+    assert.equal(server.length, 1);
+  }
 });
 
 test('a prompt that offers cancel instead of decline can be rejected on the device', async () => {

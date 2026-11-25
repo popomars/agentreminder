@@ -61,6 +61,12 @@ The device shows one approval at a time in arrival order. The count at the top i
 
 Set `approvalTimeoutSec` in `~/.agentreminder/config.json` to change the wait. For older installations or after changing the limit, rerun the installer for the same agent and restart the agent so it uses the updated hook timeout. Update the dsh bridge timeout in its profile too.
 
+### Questions and other input
+
+For a single two-option question, use the two on-screen choices or the matching physical buttons. The **Continue on computer** control is also available. Requests with more choices, multiple questions, text fields or authentication show a reminder on the board and can be completed on the computer. For secret fields, the board only shows a handoff reminder. Approvals and live input requests share the pending queue.
+
+Codex Desktop uses the desktop bridge for native questions, MCP forms and permission requests that need desktop review. Reopen Codex to load the updated bridge. Claude Code uses `AskUserQuestion`, plus the `Elicitation` hook in Claude Code 2.1.76 or newer. Use Claude Code 2.1.76 or newer for the plugin package. For a two-option prompt, Claude waits for the device answer or handoff. Other prompts open on the computer. dsh can display reminders from its configured bridge and answers remain in dsh. Managed cloud interactions need an event source that connects to the local hooks or bridge.
+
 ### dsh and remote agents
 
 Install with `--agent dsh`, install the Claude Code hooks bridge in your dsh profile, and merge the [Cordis example](integrations/dsh/cordis.patch.yml). Set `configPath` to the absolute path of `~/.agentreminder/dsh-hooks.json`. dsh still applies its own approval policy.

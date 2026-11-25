@@ -91,3 +91,22 @@ test('uninstall leaves an SSH-forwarded daemon alone', async t => {
   await run('bash', ['uninstall.sh'], { cwd: root, env });
   assert.deepEqual(seen, ['GET']);
 });
+
+test('Claude setup enables the elicitation hook only on supported versions', async t => {
+  const { home, env } = fixture(t);
+  const bin = path.join(home, 'bin');
+  fs.mkdirSync(bin);
+  const cli = path.join(bin, 'claude');
+  env.PATH = bin + path.delimiter + env.PATH;
+  const read = () => JSON.parse(fs.readFileSync(path.join(home, '.claude/settings.json'))).hooks;
+  const install = () => run(process.execPath, [path.join(root, 'host/agentreminder.js'), 'install', 'claude'], { env });
+  fs.writeFileSync(cli, '#!/bin/sh\nprintf "2.1.76 (Claude Code)\\n"\n', { mode: 0o700 });
+  await install();
+  assert(read().Elicitation);
+  fs.writeFileSync(cli, '#!/bin/sh\nprintf "2.0.76 (Claude Code)\\n"\n');
+  await install();
+  const legacy = read();
+  assert(!legacy.Elicitation);
+  assert.match(legacy.Notification[0].matcher, /elicitation_dialog/);
+  assert.equal(legacy.PreToolUse[0].matcher, 'AskUserQuestion');
+});

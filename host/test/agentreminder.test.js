@@ -65,6 +65,25 @@ test('concurrent approvals keep separate deadlines and finish independently', as
   hub.onMessage(a.link, { t: 'decision', id: next.id, decision: 'allow' });
   assert.equal((await next.promise).decision, 'allow');
 });
+
+test('legacy firmware receives a reminder, while display-only cards reject device choices', async t => {
+  const hub = new Hub({});
+  const legacy = device(hub);
+  t.after(() => legacy.link.close());
+  const input = { interaction: true, title: '等待回答', reason: '请输入答案' };
+  assert.equal((await hub.requestApproval({ ...input, choices: ['A', 'B'] }, 1000).promise).decision, null);
+  assert.equal(legacy.messages.at(-1).t, 'notify');
+  assert.match(legacy.messages.at(-1).title, /请输入答案/);
+  const current = device(hub, 'current');
+  t.after(() => current.link.close());
+  current.link.info.interaction = true;
+  const pending = hub.requestApproval(input, 1000);
+  assert.equal(current.messages.at(-1).id, pending.id);
+  hub.onMessage(current.link, { t: 'decision', id: pending.id, decision: 'allow' });
+  assert(hub.pending.has(pending.id));
+  hub.onMessage(current.link, { t: 'decision', id: pending.id, decision: 'skip' });
+  assert.equal((await pending.promise).decision, null);
+});
 test('install preserves unrelated settings and refuses malformed config', () => {
   const file = path.join(process.env.AGENTREMINDER_HOME, 'settings.json');
   const original = { model: 'existing', hooks: { Stop: [{ hooks: [{ command: 'other' }] }] } };

@@ -50,6 +50,9 @@ Each frame starts with a two-byte big-endian payload length. The host and device
 
 The default approval deadline is 300 seconds from receipt. The device displays the oldest approval and the total pending count. Each request keeps its own deadline while queued.
 
+- `POST /interaction {timeoutSec, info}` is the human-input counterpart to `/approval`. This endpoint dispatches an `approval` wire message with `interaction:true` only to firmware that advertises `interaction:true` in its handshake. Older firmware receives an informational notification.
+- An interaction with `choices:[left,right]` maps `deny` and `allow` to the left and right option. `skip` hands control back to the computer without an answer. An interaction without choices accepts only `skip`. The Codex bridge cancels a mirrored interaction when the desktop or App Server resolves it.
+
 The optional Codex desktop launcher mirrors native command and file approvals
 through the App Server stdio proxy. It sends the request to the desktop before
 waiting for the same decision on the device. A desktop response or

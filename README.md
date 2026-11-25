@@ -64,6 +64,12 @@ bash ~/.agentreminder/app/host/open-codex.sh
 
 `~/.agentreminder/config.json` 中的 `approvalTimeoutSec` 可调整等待时间。升级以前安装的 hooks，或调整等待时间后，可用原来的 `--agent` 参数重跑安装脚本并重开 agent。dsh 需同步更新其 profile 中的桥接超时。
 
+### 回答问题与继续任务
+
+单个二选一问题可用触屏或左右实体键回答，也可点「回电脑上继续」。多选项、多道题、自由输入和登录验证等会在设备上显示提示，答案在电脑上提交。需要密码或其他保密输入时，设备只提示回电脑。审批和等待回答共用待处理队列。
+
+Codex 桌面端通过上述双端配置接入原生问题、MCP 表单及需要在电脑上处理的权限请求。重开 Codex 后加载更新。Claude Code 通过 `AskUserQuestion` 接入，2.1.76 及更新版本还支持 `Elicitation` hook。使用 Claude 插件包时请使用 2.1.76 或更新版本。二选一时先等设备选择或交回电脑，其他表单会直接在电脑上打开。dsh 通过已配置的桥接接收问题或等待通知，电脑负责提交答案。云端交互需要对应服务提供事件接口。
+
 ### dsh
 
 `bash install.sh --agent dsh` 会生成 dsh 的 hook 文件。dsh 还需要在你的 profile 中安装并配置 Claude Code hooks 桥接。将安装目录内 [Cordis 配置示例](integrations/dsh/cordis.patch.yml) 合并到对应 profile，并把 `configPath` 指向 `~/.agentreminder/dsh-hooks.json` 的绝对路径。桥接使用 `PreToolUse`，其同意行为还受 dsh 自身权限策略约束。

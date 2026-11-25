@@ -6,7 +6,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const readline = require('node:readline');
-const { call, ensureDaemon, loadConfig, describeSession } = require('./agentreminder');
+const { call, ensureDaemon, loadConfig, describeSession, questionCard, formCard } = require('./agentreminder');
 
 const approvalTypes = {
   'item/commandExecution/requestApproval': '执行命令',
@@ -33,6 +33,35 @@ function approvalChoices(message) {
   if (!Array.isArray(choices) || !choices.length) return { allow: 'accept', deny: 'decline' };
   const deny = choices.includes('decline') ? 'decline' : choices.includes('cancel') ? 'cancel' : null;
   return choices.includes('accept') && deny ? { allow: 'accept', deny } : null;
+}
+
+function inputRequest(message) {
+  const params = message.params || {};
+  let request;
+  let respond;
+  switch (message.method) {
+    case 'item/tool/requestUserInput': {
+      request = questionCard(params.questions, typeof params.questions?.[0]?.id === 'string' && !!params.questions[0].id);
+      if (request.choices) respond = decision => ({ answers: {
+        [request.question.id]: { answers: [request.choices[decision === 'allow' ? 1 : 0]] },
+      } });
+      break;
+    }
+    case 'mcpServer/elicitation/request':
+      request = formCard(params.mode, params.message, params.requestedSchema);
+      if (request.content) respond = decision => ({ action: 'accept', content: request.content(decision) });
+      break;
+    case 'item/permissions/requestApproval':
+    case 'applyPatchApproval':
+    case 'execCommandApproval':
+    case 'item/commandExecution/requestApproval':
+    case 'item/fileChange/requestApproval':
+      request = { card: { title: '请在电脑上审批', interaction: true,
+        reason: typeof params.reason === 'string' ? params.reason.slice(0, 600) : '有一条审批需要在电脑上处理。' } };
+      break;
+    default: return null;
+  }
+  return { card: { agent: 'codex', ...describeSession({ thread_id: params.threadId, cwd: params.cwd }, 'codex'), ...request.card }, respond };
 }
 
 function report(event, details) {
@@ -70,31 +99,40 @@ class ApprovalBridge {
       return;
     }
     const id = message.id;
-    if (this.pending.has(id)) return;
+    if ((typeof id !== 'number' && typeof id !== 'string') || this.pending.has(id)) return;
     if (Object.hasOwn(approvalTypes, message.method)) {
       const choices = message.params?.availableDecisions;
       this.trace('native-request', { id, method: message.method,
         choices: Array.isArray(choices) ? choices.map(item => typeof item === 'string' ? item : 'structured') : null });
     }
-    const card = this.makeCard(message);
+    let card = this.makeCard(message);
+    let respond;
+    if (card) {
+      const choices = approvalChoices(message);
+      if (choices) respond = decision => ({ decision: choices[decision] });
+    } else {
+      const input = inputRequest(message);
+      card = input?.card;
+      respond = input?.respond;
+    }
     if (!card) return;
     this.answered.delete(id);
     const controller = new AbortController();
     this.pending.set(id, controller);
-    this.settleFromDevice(id, card, controller, approvalChoices(message));
+    this.settleFromDevice(id, card, controller, respond);
   }
 
-  async settleFromDevice(id, card, controller, choices) {
+  async settleFromDevice(id, card, controller, respond) {
     try {
       const result = await this.askDevice(card, controller.signal);
       if (this.pending.get(id) !== controller) return;
       this.trace('device-response', { id, decision: result?.decision || null, reason: result?.reason || null });
-      if (result?.decision !== 'allow' && result?.decision !== 'deny') return;
+      if (!respond || (result?.decision !== 'allow' && result?.decision !== 'deny')) return;
       this.answered.add(id);
       if (this.answered.size > 256) this.answered.delete(this.answered.values().next().value);
       this.toServer(JSON.stringify({
         id,
-        result: { decision: choices[result.decision] },
+        result: respond(result.decision),
       }));
     } catch (error) {
       if (!controller.signal.aborted) this.trace('device-error', { id, code: error.code || error.name });
@@ -126,7 +164,7 @@ function parse(line) {
 async function askDevice(info, signal) {
   if (signal.aborted || !(await ensureDaemon()) || signal.aborted) return null;
   const timeoutSec = loadConfig().approvalTimeoutSec;
-  return call('POST', '/approval', { timeoutSec, info }, (timeoutSec + 10) * 1000, signal);
+  return call('POST', info.interaction ? '/interaction' : '/approval', { timeoutSec, info }, (timeoutSec + 10) * 1000, signal);
 }
 
 function run(args) {

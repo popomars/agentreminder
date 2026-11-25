@@ -4,8 +4,14 @@
     "PermissionRequest": [
       { "hooks": [ { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/host/agentreminder.js\" hook --agent claude --event permission", "timeout": 330 } ] }
     ],
+    "PreToolUse": [
+      { "matcher": "AskUserQuestion", "hooks": [ { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/host/agentreminder.js\" hook --agent claude --event question", "timeout": 330 } ] }
+    ],
+    "Elicitation": [
+      { "hooks": [ { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/host/agentreminder.js\" hook --agent claude --event elicitation", "timeout": 330 } ] }
+    ],
     "Notification": [
-      { "matcher": "idle_prompt|agent_needs_input|elicitation_dialog", "hooks": [ { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/host/agentreminder.js\" hook --agent claude --event notification", "timeout": 10 } ] }
+      { "matcher": "idle_prompt|agent_needs_input|auth_storage_failure|quota_auto_resume_disabled", "hooks": [ { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/host/agentreminder.js\" hook --agent claude --event notification", "timeout": 10 } ] }
     ],
     "Stop": [
       { "hooks": [ { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/host/agentreminder.js\" hook --agent claude --event stop", "timeout": 10 } ] }

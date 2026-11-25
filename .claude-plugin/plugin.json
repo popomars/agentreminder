@@ -1,6 +1,6 @@
 {
   "name": "agentreminder",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "Show agent approval requests and task-complete messages on an ESP32-S3 touch device; approve or deny from the device.",
   "author": { "name": "mars" },
   "license": "MIT",

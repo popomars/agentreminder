@@ -7,7 +7,7 @@
 #include "ui.h"
 #include "ble_transport.h"
 
-#define FW_VERSION "0.3.2"
+#define FW_VERSION "0.3.3"
 #define TCP_PORT 47322
 #define HOSTNAME "agentreminder"
 
@@ -73,6 +73,7 @@ static void handle(const String &line, uint8_t ch) {
     r["t"] = "hello"; r["app"] = "agentreminder"; r["fw"] = FW_VERSION; r["id"] = deviceId();
     r["link"] = ch == CH_USB ? "usb" : ch == CH_BLE ? "ble" : "wifi";
     r["ble"] = 1; r["ble_paired"] = ble_paired();
+    r["interaction"] = true;
     r["font_ok"] = ui_font_ok();
     if (WiFi.status() == WL_CONNECTED) r["ip"] = WiFi.localIP().toString();
     sendOn(ch, r);
@@ -84,6 +85,11 @@ static void handle(const String &line, uint8_t ch) {
     it.id = m["id"] | ""; it.agent = m["agent"] | "agent";
     it.conversation = m["conversation"] | "未命名对话"; it.reason = m["reason"] | "";
     it.title = m["title"] | ""; it.channels = ch; it.at = millis();
+    it.interaction = (m["interaction"] | false) || !strcmp(m["kind"] | "", "input");
+    if (it.interaction) {
+      it.leftChoice = m["choices"][0] | "";
+      it.rightChoice = m["choices"][1] | "";
+    }
     it.timeoutMs = constrain(m["timeout"] | static_cast<int>(DEFAULT_APPROVAL_SECONDS), 1, 3600) * 1000UL;
     if (pairing) {
       const char *candidate = m["key"] | "";

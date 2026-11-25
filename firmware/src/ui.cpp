@@ -130,16 +130,21 @@ static void onDismiss(lv_event_t *e) {
   dirty = true;
 }
 
-static lv_obj_t *button(lv_obj_t *parent, const char *txt, uint32_t color, const char *decision) {
+static lv_obj_t *button(lv_obj_t *parent, const char *txt, uint32_t color, const char *decision, int height = 86, bool compact = false) {
   lv_obj_t *b = lv_button_create(parent);
   lv_obj_set_width(b, 0);
   lv_obj_set_flex_grow(b, 1);
-  lv_obj_set_height(b, 86);
+  lv_obj_set_height(b, height);
   lv_obj_set_style_pad_all(b, 0, 0);
   lv_obj_set_style_bg_color(b, lv_color_hex(color), 0);
   lv_obj_set_style_radius(b, 10, 0);
   lv_obj_add_event_cb(b, onDecision, LV_EVENT_CLICKED, (void *)decision);
-  lv_obj_t *l = label(b, txt, lv_color_white(), false);
+  lv_obj_t *l = compact ? metaLabel(b, txt, lv_color_white()) : label(b, txt, lv_color_white(), false);
+  if (compact) {
+    lv_obj_set_width(l, lv_pct(94));
+    lv_label_set_long_mode(l, LV_LABEL_LONG_SCROLL_CIRCULAR);
+    lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
+  }
   lv_obj_center(l);
   return b;
 }
@@ -166,7 +171,19 @@ static void buildIdle() {
 }
 
 static void updateApprovalCount() {
-  lv_label_set_text_fmt(approvalCountLabel, "待审批 %u 项", static_cast<unsigned>(approvals.size()));
+  const bool hasInput = std::any_of(approvals.begin(), approvals.end(), [](const Item &item) { return item.interaction; });
+  lv_label_set_text_fmt(approvalCountLabel, hasInput ? "待处理 %u 项" : "待审批 %u 项", static_cast<unsigned>(approvals.size()));
+}
+
+static bool hasChoices(const Item &item) { return item.leftChoice.length() && item.rightChoice.length(); }
+
+static lv_obj_t *buttonRow() {
+  lv_obj_t *row = lv_obj_create(content);
+  lv_obj_remove_style_all(row);
+  lv_obj_set_size(row, lv_pct(100), LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+  lv_obj_set_style_pad_column(row, 8, 0);
+  return row;
 }
 
 static void buildApproval() {
@@ -189,14 +206,19 @@ static void buildApproval() {
   if (it.conversation.length()) label(summary, it.conversation, lv_color_white());
   cardMetadata(content, it, true);
 
-  lv_obj_t *btns = lv_obj_create(content);
-  lv_obj_remove_style_all(btns);
-  lv_obj_set_size(btns, lv_pct(100), LV_SIZE_CONTENT);
-  lv_obj_set_flex_flow(btns, LV_FLEX_FLOW_ROW);
-  lv_obj_set_style_pad_column(btns, 8, 0);
-  button(btns, "拒绝", 0xC0392B, "deny");
-  button(btns, "终端", 0x555555, "skip");
-  button(btns, "同意", 0x27AE60, "allow");
+  if (it.interaction) {
+    if (hasChoices(it)) {
+      auto *choices = buttonRow();
+      button(choices, it.leftChoice.c_str(), 0x365578, "deny", 68, true);
+      button(choices, it.rightChoice.c_str(), 0x365578, "allow", 68, true);
+    }
+    button(buttonRow(), "回电脑上继续", 0x555555, "skip", 50, true);
+  } else {
+    auto *btns = buttonRow();
+    button(btns, "拒绝", 0xC0392B, "deny");
+    button(btns, "终端", 0x555555, "skip");
+    button(btns, "同意", 0x27AE60, "allow");
+  }
 }
 
 static void buildNotes() {
@@ -217,8 +239,10 @@ static void buildNotes() {
     lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
     lv_obj_add_event_cb(card, onDismiss, LV_EVENT_CLICKED, (void *)(uintptr_t)i);
     label(card, n.title, lv_color_white());
+    if (n.interaction && n.reason.length()) label(card, n.reason, lv_color_white());
     if (n.conversation.length()) label(card, n.conversation, lv_color_hex(0xD2D2D2));
     cardMetadata(card, n, false);
+    if (n.interaction) metaLabel(card, "请在电脑上继续", lv_color_hex(0xC5C5C5));
   }
 }
 
@@ -318,7 +342,8 @@ void ui_loop() {
       approvals.erase(approvals.begin() + i); dirty = true;
     } else ++i;
   }
-  const String activeId = approvals.empty() ? "" : approvals.front().id;
+  const String activeId = approvals.empty() || (approvals.front().interaction && !hasChoices(approvals.front()))
+    ? "" : approvals.front().id;
   const bool denied = denyKey.poll(activeId), allowed = allowKey.poll(activeId);
   if (denied) decide("deny", BUTTON_DENY_PIN);
   else if (allowed) decide("allow", BUTTON_ALLOW_PIN);
