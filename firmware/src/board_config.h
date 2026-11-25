@@ -13,8 +13,9 @@
 #define TP_RST 40
 #define TP_SDA 15
 #define TP_SCL 14
-#define BUTTON_DENY_PIN 18   // left +/KEY
-#define BUTTON_ALLOW_PIN 0   // right BOOT/-
+// Left/right are viewed from the display side, with USB at the bottom.
+#define BUTTON_DENY_PIN 0    // front left: BOOT/-
+#define BUTTON_ALLOW_PIN 18  // front right: +/KEY
 
 static volatile bool boardTouchPending = false;
 static void IRAM_ATTR boardTouchInterrupt() { boardTouchPending = true; }

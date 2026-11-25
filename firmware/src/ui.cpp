@@ -55,10 +55,14 @@ static lv_obj_t *label(lv_obj_t *parent, const String &txt, lv_color_t col, bool
   return l;
 }
 
-static void decide(const char *decision) {
+static void decide(const char *decision, int gpio = -1) {
   if (approvals.empty()) return;
   Item it = approvals.front();
   approvals.erase(approvals.begin());
+  if (gpio >= 0) {
+    Serial.printf("{\"t\":\"log\",\"msg\":\"approval %s physical GPIO %d -> %s\"}\n",
+                  it.id.c_str(), gpio, decision);
+  }
   sendDecision(it, decision);
   dirty = true;
 }
@@ -229,8 +233,8 @@ void ui_loop() {
   }
   const String activeId = approvals.empty() ? "" : approvals.front().id;
   const bool denied = denyKey.poll(activeId), allowed = allowKey.poll(activeId);
-  if (denied) decide("deny");
-  else if (allowed) decide("allow");
+  if (denied) decide("deny", BUTTON_DENY_PIN);
+  else if (allowed) decide("allow", BUTTON_ALLOW_PIN);
   if (dirty) rebuild();
   if (dimAt && millis() > dimAt && approvals.empty()) { lcd.setBrightness(30); dimAt = 0; }
   lv_timer_handler();
