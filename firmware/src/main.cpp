@@ -7,7 +7,7 @@
 #include "ui.h"
 #include "ble_transport.h"
 
-#define FW_VERSION "0.3.4"
+#define FW_VERSION "0.3.5"
 #define TCP_PORT 47322
 #define HOSTNAME "agentreminder"
 
@@ -83,8 +83,15 @@ static void handle(const String &line, uint8_t ch) {
     const bool pairing = !strcmp(t, "ble-pair");
     Item it;
     it.id = m["id"] | ""; it.agent = m["agent"] | "agent";
+    it.sessionId = m["sessionId"] | "";
     it.conversation = m["conversation"] | "未命名对话"; it.reason = m["reason"] | "";
     it.title = m["title"] | ""; it.channels = ch; it.at = millis();
+    if (!pairing) {
+      const char *receivedTime = m["receivedTime"] | "";
+      if (strlen(receivedTime) == 11 && strspn(receivedTime, "0123456789- :") == 11) it.receivedTime = receivedTime;
+      it.receivedAt = m["ts"] | uint64_t{0};
+      it.sequence = m["sequence"] | uint64_t{0};
+    }
     it.interaction = (m["interaction"] | false) || !strcmp(m["kind"] | "", "input");
     if (it.interaction) {
       it.leftChoice = m["choices"][0] | "";

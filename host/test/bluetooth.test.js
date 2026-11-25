@@ -71,3 +71,36 @@ test('USB confirmation enrolls only the selected board; its BLE link owns pendin
   assert.equal(hub.notify({ title: '任务完成', kind: 'done' }), 1);
   assert.equal(ble.sent.at(-1).t, 'notify');
 });
+
+test('card times survive approval replay and notifications in the same millisecond have a stable order', async t => {
+  const hub = new Hub({ usb: { pairedDeviceId: id } });
+  const connect = kind => {
+    const sent = [];
+    const link = new Link(kind, id, line => sent.push(JSON.parse(line)), () => {}, hub);
+    link.pairedDeviceId = kind === 'ble' ? id : undefined;
+    t.after(() => link.close());
+    hub.add(link);
+    hub.onMessage(link, { t: 'hello', app: 'agentreminder', id, interaction: true });
+    return sent;
+  };
+  const start = new Date(2026, 0, 2, 3, 4).getTime();
+  let now = start;
+  t.mock.method(Date, 'now', () => now);
+  const usb = connect('usb');
+  const question = hub.requestApproval({ title: '等待回答', interaction: true, choices: ['一', '二'] }, 300000);
+  t.after(() => hub.cancel(question.id, 'test cleanup'));
+  assert.equal(usb.at(-1).receivedTime, '01-02 03:04');
+  now += 60000;
+  const ble = connect('ble');
+  assert.equal(ble.at(-1).id, question.id);
+  assert.equal(ble.at(-1).ts, start);
+  assert.equal(ble.at(-1).receivedTime, usb.at(-1).receivedTime);
+
+  hub.notify({ kind: 'done', title: '第一次完成' });
+  hub.notify({ kind: 'done', title: '第二次完成' });
+  const [first, second] = ble.slice(-2);
+  assert.deepEqual(usb.slice(-2), [first, second]);
+  assert.equal(first.ts, second.ts);
+  assert.equal(second.receivedTime, '01-02 03:05');
+  assert(second.sequence > first.sequence);
+});

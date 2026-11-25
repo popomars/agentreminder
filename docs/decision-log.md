@@ -73,3 +73,15 @@ both its runtime and firmware from that commit. Firmware integrity is verified
 before flashing. The HTTP listener owns the USB and Bluetooth transports so
 concurrent hook startup cannot attach duplicate device clients. Uninstall keeps
 pairing data and removes only the installer-managed files and hooks.
+
+### ADR-0004: Timestamp cards at receipt and group completed conversations
+
+- Date: 2026-11-25
+- Status: Accepted
+
+The daemon stamps cards in its local time when it first receives the event.
+The device can display that time without maintaining a wall clock, and a
+pending card keeps the same timestamp across transport replays. The device
+keeps the latest completion per source host, project, and conversation.
+A session ID distinguishes conversations with the same title. Firmware can
+still display cards from an older daemon that sends no formatted timestamp.

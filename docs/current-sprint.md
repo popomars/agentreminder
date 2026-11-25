@@ -8,4 +8,9 @@
 
 USB and macOS Bluetooth have passed a physical device round trip. Codex desktop command approvals, physical queue counts, two-choice rendering and desktop handoff have been exercised. A logged-in Claude session, a real dsh profile, Linux hardware, and managed cloud approvals remain outside the verified matrix.
 
+Host v0.4.4 and firmware v0.3.5 add receipt times and group completion cards
+by host, project, and conversation. The new firmware was flashed and connected
+over USB and Bluetooth. Visual layout and physical controls in this build
+still await manual confirmation.
+
 See [Chinese setup](../README.md), [English setup](../README.en.md), [protocol](protocol.md), and [progress](progress.md).

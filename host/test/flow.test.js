@@ -74,6 +74,8 @@ test('real hook processes → daemon → TCP device → agent-compatible JSON', 
   assert.deepEqual(received.filter(m => m.t === 'approval').at(-1).choices, ['预览', '正式']);
   assert.equal(await hook('claude', 'question', { tool_input: { questions: [{ ...question, multiSelect: true }] } }), '');
   assert.equal(received.filter(m => m.t === 'notify').at(-1).kind, 'input');
+  assert.equal(await hook('claude', 'question', { tool_input: { questions: [{ ...question, isOther: true }] } }), '');
+  assert.equal(received.filter(m => m.t === 'notify').at(-1).kind, 'input');
   assert.equal(await hook('dsh', 'question', { tool_input: { questions: [question] } }), '');
   assert.equal(received.filter(m => m.t === 'notify').at(-1).kind, 'input');
   decision = 'allow';
@@ -94,7 +96,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     send({ id: message.params.requestId, method: 'item/commandExecution/requestApproval', params: { reason: '双端测试' } });
   } else if (message.method === 'fixture/trigger-question') {
     send({ id: message.params.requestId, method: 'item/tool/requestUserInput', params: { questions: [{
-      id: 'environment', question: '请选择部署环境', options: [{ label: '预览' }, { label: '正式' }],
+      id: 'environment', question: '请选择部署环境', isOther: true, options: [{ label: '预览' }, { label: '正式' }],
     }] } });
   } else if (message.result) {
     send({ method: 'serverRequest/resolved', params: { requestId: message.id } });
@@ -128,6 +130,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
 
   send({ method: 'fixture/trigger-question', params: { requestId: 102 } });
   await until(() => desktop.some(m => m.method === 'serverRequest/resolved' && m.params.requestId === 102));
+  assert.deepEqual(received.filter(m => m.t === 'approval').at(-1).choices, ['预览', '正式']);
   assert(desktop.some(m => m.method === 'fixture/received' && m.params.answers?.environment?.answers[0] === '正式'));
   proxy.stdin.end();
 });

@@ -41,7 +41,9 @@ function inputRequest(message) {
   let respond;
   switch (message.method) {
     case 'item/tool/requestUserInput': {
-      request = questionCard(params.questions, typeof params.questions?.[0]?.id === 'string' && !!params.questions[0].id);
+      const questionId = params.questions?.[0]?.id;
+      // Codex adds an optional free-text choice alongside the provided options.
+      request = questionCard(params.questions, typeof questionId === 'string' && !!questionId, { allowOptionalOther: true });
       if (request.choices) respond = decision => ({ answers: {
         [request.question.id]: { answers: [request.choices[decision === 'allow' ? 1 : 0]] },
       } });

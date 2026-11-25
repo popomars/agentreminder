@@ -75,10 +75,30 @@ static lv_obj_t *metaLabel(lv_obj_t *parent, const String &text, lv_color_t colo
   return l;
 }
 
+static lv_obj_t *horizontalRow(lv_obj_t *parent) {
+  lv_obj_t *row = lv_obj_create(parent);
+  lv_obj_remove_style_all(row);
+  lv_obj_set_size(row, lv_pct(100), LV_SIZE_CONTENT);
+  lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
+  lv_obj_set_style_pad_column(row, 8, 0);
+  return row;
+}
+
+static lv_obj_t *timedMetadata(lv_obj_t *parent, const String &text, const String &time, lv_color_t color) {
+  if (time.isEmpty()) return metaLabel(parent, text, color);
+  auto *row = horizontalRow(parent);
+  auto *leading = metaLabel(row, text, color);
+  lv_obj_set_width(leading, 0);
+  lv_obj_set_flex_grow(leading, 1);
+  lv_obj_set_width(metaLabel(row, time, color), LV_SIZE_CONTENT);
+  return leading;
+}
+
 static void cardMetadata(lv_obj_t *parent, const Item &item, bool scroll) {
   if (item.host.isEmpty()) return;
   auto color = lv_color_hex(0xC5C5C5);
-  auto *host = metaLabel(parent, "主机 " + item.host, color);
+  auto *host = scroll ? metaLabel(parent, "主机 " + item.host, color)
+    : timedMetadata(parent, "主机 " + item.host, item.receivedTime, color);
   auto *project = metaLabel(parent, "项目 " + item.project, color);
   if (scroll) {
     lv_label_set_long_mode(host, LV_LABEL_LONG_SCROLL_CIRCULAR);
@@ -177,20 +197,11 @@ static void updateApprovalCount() {
 
 static bool hasChoices(const Item &item) { return item.leftChoice.length() && item.rightChoice.length(); }
 
-static lv_obj_t *buttonRow() {
-  lv_obj_t *row = lv_obj_create(content);
-  lv_obj_remove_style_all(row);
-  lv_obj_set_size(row, lv_pct(100), LV_SIZE_CONTENT);
-  lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-  lv_obj_set_style_pad_column(row, 8, 0);
-  return row;
-}
-
 static void buildApproval() {
   const Item &it = approvals.front();
   Serial.printf("{\"t\":\"log\",\"msg\":\"render approval %s\"}\n", it.id.c_str());
   lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
-  approvalCountLabel = metaLabel(content, "", lv_color_hex(0xC5C5C5));
+  approvalCountLabel = timedMetadata(content, "", it.receivedTime, lv_color_hex(0xC5C5C5));
   updateApprovalCount();
 
   lv_obj_t *summary = lv_obj_create(content);
@@ -208,13 +219,13 @@ static void buildApproval() {
 
   if (it.interaction) {
     if (hasChoices(it)) {
-      auto *choices = buttonRow();
+      auto *choices = horizontalRow(content);
       button(choices, it.leftChoice.c_str(), 0x365578, "deny", 68, true);
       button(choices, it.rightChoice.c_str(), 0x365578, "allow", 68, true);
     }
-    button(buttonRow(), "中键 · 回电脑上继续", 0x555555, "skip", 50, true);
+    button(horizontalRow(content), "中键 · 回电脑上继续", 0x555555, "skip", 50, true);
   } else {
-    auto *btns = buttonRow();
+    auto *btns = horizontalRow(content);
     button(btns, "拒绝", 0xC0392B, "deny");
     button(btns, "终端", 0x555555, "skip");
     button(btns, "同意", 0x27AE60, "allow");
@@ -362,8 +373,22 @@ void ui_add_approval(const Item &it) {
   wake(); dirty = true;
 }
 
+static bool sameCompletion(const Item &a, const Item &b) {
+  if (!a.completed || !b.completed || a.host != b.host || a.project != b.project) return false;
+  if (a.sessionId.length() || b.sessionId.length()) return a.sessionId == b.sessionId;
+  return a.conversation.length() && a.conversation != "未命名对话" && a.conversation == b.conversation;
+}
+
 void ui_add_notify(const Item &it) {
-  for (auto &n : notes) if (n.id == it.id) return;
+  auto existing = std::find_if(notes.begin(), notes.end(), [&](const Item &note) {
+    return note.id == it.id || sameCompletion(note, it);
+  });
+  if (existing != notes.end()) {
+    if (existing->id == it.id) return;
+    if (it.receivedAt && existing->receivedAt && (it.receivedAt < existing->receivedAt ||
+        (it.receivedAt == existing->receivedAt && it.sequence < existing->sequence))) return;
+    notes.erase(existing);
+  }
   notes.insert(notes.begin(), it);
   if (notes.size() > 20) notes.pop_back();
   wake(); dirty = true;

@@ -57,7 +57,11 @@ Use manual approval in the chat. The first response to a mirrored command or fil
 
 ### Queue and timeout
 
-The device shows one approval at a time in arrival order. The count at the top includes the visible approval. Each approval has its own deadline starting on arrival, with a **five-minute default**. At its deadline the device removes the card and returns control to the client. Completion cards appear after the approval queue clears, newest first, with up to 20 retained on the device.
+The device shows one approval at a time in arrival order. The count at the top includes the visible approval. Each approval has its own deadline starting on arrival, with a **five-minute default**. At its deadline the device removes the card and returns control to the client.
+
+Completion notifications are grouped by host, project, and conversation. Each group shows its latest card. When conversation IDs are available, chats with the same title each get their own card. The notification list appears after the approval queue clears, newest first, with up to 20 notification cards in total.
+
+Approvals, questions, and notifications show when the host service first received them in its local time, for example `11-25 14:08`. A card keeps its original time when switching between USB and Bluetooth. On an existing installation, run `bash install.sh --flash` from the updated checkout to upgrade the host and firmware together.
 
 Set `approvalTimeoutSec` in `~/.agentreminder/config.json` to change the wait. For older installations or after changing the limit, rerun the installer for the same agent and restart the agent so it uses the updated hook timeout. Update the dsh bridge timeout in its profile too.
 
@@ -65,7 +69,7 @@ Set `approvalTimeoutSec` in `~/.agentreminder/config.json` to change the wait. F
 
 For a single two-option question, use the two on-screen choices or the matching physical buttons. Briefly press the center **PWR** key or tap **Continue on computer** to hand it back. A short PWR press on an approval card also defers to the computer. Requests with more choices, multiple questions, text fields or authentication show a reminder on the board and can be completed on the computer. For secret fields, the board only shows a handoff reminder. Approvals and live input requests share the pending queue.
 
-Codex Desktop uses the desktop bridge for native questions, MCP forms and permission requests that need desktop review. Reopen Codex to load the updated bridge. Claude Code uses `AskUserQuestion`, plus the `Elicitation` hook in Claude Code 2.1.76 or newer. Use Claude Code 2.1.76 or newer for the plugin package. For a two-option prompt, Claude waits for the device answer or handoff. Other prompts open on the computer. dsh can display reminders from its configured bridge and answers remain in dsh. Managed cloud interactions need an event source that connects to the local hooks or bridge.
+Codex Desktop uses the desktop bridge for native questions, MCP forms and permission requests that need desktop review. For a single native question with two preset answers, the device displays both choices. To enter an optional **Other** answer, briefly press the center PWR key and continue on the computer. Reopen Codex to load the updated bridge. Claude Code uses `AskUserQuestion`, plus the `Elicitation` hook in Claude Code 2.1.76 or newer. Use Claude Code 2.1.76 or newer for the plugin package. For a two-option prompt, Claude waits for the device answer or handoff. Other prompts open on the computer. dsh can display reminders from its configured bridge and answers remain in dsh. Managed cloud interactions need an event source that connects to the local hooks or bridge.
 
 ### dsh and remote agents
 

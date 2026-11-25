@@ -16,10 +16,10 @@ The host ignores any line that is not JSON, such as boot logs. A link only count
 |---|---|---|
 | `hello` | `host, v` | Handshake, sent right after connecting. `host` identifies the connected host on the idle screen. |
 | `ping` | `ts` | Heartbeat every 15 s |
-| `approval` | `id, agent, host, project, sessionId, conversation, reason, title, detail, timeout` | Approval request. The device deduplicates by `id`. |
+| `approval` | `id, agent, host, project, sessionId, conversation, reason, title, detail, timeout, ts, receivedTime?` | Approval request. The device deduplicates by `id`. |
 | `resolved` | `id, decision, by` | Approval settled (here or on another channel). Remove the card. |
 | `cancel` | `id, why` | Agent side cancelled (hook process exited or timed out). Remove the card. |
-| `notify` | `id, agent, host, project, sessionId, conversation, kind(done/idle/info), title, detail` | Notification |
+| `notify` | `id, agent, host, project, sessionId, conversation, kind(done/input/idle/info), title, detail, ts, receivedTime?, sequence?` | Notification |
 | `ble-pair` | `id, conversation, key` | USB-only setup. Device shows its pairing approval. On allow it saves the new 32-byte hex key in NVS before replying `decision` with `ble_paired:true`. |
 | `wifi` | `ssid, pass` | Write the Wi-Fi config to NVS and reconnect |
 
@@ -65,6 +65,10 @@ The last device disconnecting cancels outstanding requests immediately. Heartbea
 `conversation` is the current chat name; `reason` is the agent-provided approval message. `title` remains the tool name and `detail` the operation arguments. Session transcripts are inspected locally only for their title/first prompt, never forwarded wholesale.
 
 On cards, `host` identifies the machine where the agent runs, which may differ from the connected host when forwarding over SSH. `project` is the basename of the agent's working directory. The daemon fills in its own hostname for older hooks or local HTTP clients that omit it. The device also accepts older daemons and can use the handshake host if a card lacks `host`.
+
+`ts` is the receiving daemon's Unix time in milliseconds. `receivedTime` is the same instant formatted in that daemon's local time as `MM-DD HH:mm`. Replayed approvals keep both fields. Firmware omits the display time on older cards that lack `receivedTime`.
+
+The device groups `done` notifications by `host`, `project`, and `sessionId`. When both cards lack a session ID, a known conversation title can identify the group. For each group the device displays the latest card, comparing `ts` and using the daemon's `sequence` to order notifications with the same timestamp. Other notification kinds retain their individual cards.
 
 ## SSH 远程 agent
 

@@ -89,9 +89,9 @@ function questionRequest(options, extra = {}) {
   }] } });
 }
 
-test('binary questions send exact labels in the native Codex answer', async () => {
+test('binary questions with the optional Other choice send exact labels in the native Codex answer', async () => {
   const { bridge, server, device } = fixture();
-  bridge.fromServer(questionRequest(['第一项', '第二项']));
+  bridge.fromServer(questionRequest(['第一项', '第二项'], { isOther: true }));
   assert.deepEqual(device[0].card.choices, ['第一项', '第二项']);
   device[0].resolve({ decision: 'allow' });
   await nextTick();
@@ -100,16 +100,31 @@ test('binary questions send exact labels in the native Codex answer', async () =
   assert.equal(server.length, 1);
 });
 
-test('computer handoff, multiple options, and secret answers never submit a device answer', async () => {
-  for (const [options, extra, decision] of [
-    [['A', 'B'], {}, null], [['A', 'B', 'C'], {}, 'allow'],
-    [['A', 'B'], { isOther: true }, 'allow'], [['A', 'B'], { isSecret: true }, 'allow'],
+test('handing off a binary question leaves the custom answer in Codex', async () => {
+  const { bridge, server, device } = fixture();
+  bridge.fromServer(questionRequest(['A', 'B'], { isOther: true }));
+  assert.deepEqual(device[0].card.choices, ['A', 'B']);
+  device[0].resolve({ decision: null });
+  await nextTick();
+  assert.deepEqual(server, []);
+  const line = JSON.stringify({ id: 14, result: { answers: { choice: { answers: ['自定义答案'] } } } });
+  bridge.fromDesktop(line);
+  assert.deepEqual(server, [line]);
+});
+
+test('questions requiring the computer never submit a device answer', async () => {
+  for (const [options, extra, multiple] of [
+    [['A', 'B', 'C'], { isOther: true }], [[], { isOther: true }],
+    [['A', 'B'], { isOther: true, isSecret: true }], [['A', 'B'], { multiSelect: true }],
+    [['A', 'B'], { isOther: true }, true],
   ]) {
     const { bridge, server, device } = fixture();
-    bridge.fromServer(questionRequest(options, extra));
-    if (decision) assert.equal(device[0].card.choices, undefined);
+    const prompt = JSON.parse(questionRequest(options, extra));
+    if (multiple) prompt.params.questions.push({ ...prompt.params.questions[0], id: 'second' });
+    bridge.fromServer(JSON.stringify(prompt));
+    assert.equal(device[0].card.choices, undefined);
     if (extra.isSecret) assert.doesNotMatch(device[0].card.reason, /选择目标/);
-    device[0].resolve({ decision });
+    device[0].resolve({ decision: 'allow' });
     await nextTick();
     assert.equal(server.length, 0);
     bridge.fromDesktop(JSON.stringify({ id: 14, result: { answers: {} } }));

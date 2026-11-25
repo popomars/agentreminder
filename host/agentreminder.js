@@ -24,7 +24,7 @@ const crypto = require('crypto');
 const { spawn, execFileSync } = require('child_process');
 const bluetooth = require('./bluetooth');
 
-const VERSION = '0.4.3';
+const VERSION = '0.4.4';
 const HOME_DIR = process.env.AGENTREMINDER_HOME || path.join(os.homedir(), '.agentreminder');
 const CONFIG_PATH = path.join(HOME_DIR, 'config.json');
 const LOG_PATH = path.join(HOME_DIR, 'daemon.log');
@@ -59,6 +59,11 @@ function log(...args) {
 }
 
 const clip = (s, n) => { s = String(s ?? ''); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
+function cardTime(ts) {
+  const date = new Date(ts);
+  const two = n => String(n).padStart(2, '0');
+  return `${two(date.getMonth() + 1)}-${two(date.getDate())} ${two(date.getHours())}:${two(date.getMinutes())}`;
+}
 const hostName = (() => {
   if (process.platform === 'darwin') {
     try {
@@ -110,6 +115,7 @@ class Hub {
     this.cfg = cfg;
     this.links = new Set();
     this.pending = new Map();   // id -> { payload, resolve, timer }
+    this.notificationSequence = 0;
   }
   connectedLinks() { return [...this.links].filter(l => l.ready); }
   readyLinks() {
@@ -175,6 +181,7 @@ class Hub {
 
   /** Ask connected devices. promise -> { decision: 'allow'|'deny'|null } (null = let the agent ask normally). */
   requestApproval(info, timeoutMs, target = null, enrollmentKey = null) {
+    const ts = Date.now();
     const id = crypto.randomUUID();
     const links = target ? [target] : this.requestLinks(info);
     if (!links.length || (target && (!target.ready || target.closed))) {
@@ -186,7 +193,7 @@ class Hub {
     const promise = new Promise(resolve => {
       // An already-running desktop bridge may still send file approvals without a project.
       const project = info.project || (!info.host && info.agent === 'codex' ? clip(path.basename(codexThread(info.sessionId).cwd || ''), 80) : '');
-      const payload = { ...info, host: info.host || hostName, project, t: 'approval', id, ts: Date.now(), timeout: Math.round(timeoutMs / 1000) };
+      const payload = { ...info, host: info.host || hostName, project, t: 'approval', id, ts, receivedTime: cardTime(ts), timeout: Math.round(timeoutMs / 1000) };
       const timer = setTimeout(() => this.resolve(id, null, 'timeout'), timeoutMs);
       this.pending.set(id, { payload, resolve, timer, target, deadline: Date.now() + timeoutMs });
       if (enrollmentKey) target.send({ ...payload, t: 'ble-pair', key: enrollmentKey });
@@ -216,7 +223,9 @@ class Hub {
     p.resolve({ decision: null, reason: why });
   }
   notify(info) {
-    const payload = { ...info, host: info.host || hostName, t: 'notify', id: crypto.randomUUID(), ts: Date.now() };
+    const ts = Date.now();
+    const payload = { ...info, host: info.host || hostName, t: 'notify', id: crypto.randomUUID(), ts, receivedTime: cardTime(ts),
+      sequence: ++this.notificationSequence };
     const links = this.readyLinks();
     for (const link of links) {
       if (info.kind === 'input' && info.reason && link.info.interaction !== true) {
@@ -662,11 +671,12 @@ function describeTool(input) {
   return { title: name, detail: clip(detail, 900), reason: clip(reason, 300) };
 }
 
-function questionCard(questions, canAnswer = true) {
+function questionCard(questions, canAnswer = true, { allowOptionalOther = false } = {}) {
   const list = Array.isArray(questions) ? questions.filter(q => q && typeof q.question === 'string') : [];
   const first = list[0];
   const options = Array.isArray(first?.options) ? first.options.map(option => option?.label) : [];
-  const choices = canAnswer && list.length === 1 && questions.length === 1 && !first.isOther && !first.isSecret && !first.multiSelect &&
+  const choices = canAnswer && list.length === 1 && questions.length === 1 &&
+    (allowOptionalOther || !first.isOther) && !first.isSecret && !first.multiSelect &&
     options.length === 2 && options.every(label => typeof label === 'string' && label.trim()) && options[0] !== options[1]
     ? options : null;
   const reason = list.map(q => {
