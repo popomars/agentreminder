@@ -109,12 +109,15 @@ class Hub {
   add(link) {
     this.links.add(link);
     log('link open', link.kind, link.name);
-    link.send({ t: 'hello', host: os.hostname(), v: VERSION });
+    const hello = { t: 'hello', host: os.hostname(), v: VERSION };
+    link.helloRetry = setInterval(() => link.send(hello), 500);
     // A port that never answers hello is not our device.
     link.helloTimer = setTimeout(() => { if (!link.ready) { log('no hello from', link.name); link.close(); } }, 6000);
+    link.send(hello);
   }
   onClose(link) {
     clearTimeout(link.helloTimer);
+    clearInterval(link.helloRetry);
     this.links.delete(link);
     log('link closed', link.kind, link.name);
     for (const [id, pending] of this.pending) {
@@ -128,6 +131,7 @@ class Hub {
       case 'hello':
         if (msg.app !== 'agentreminder') return;
         link.ready = true; link.info = msg; clearTimeout(link.helloTimer);
+        clearInterval(link.helloRetry);
         log('device ready', link.kind, link.name, msg);
         if (this.readyLinks().includes(link)) {
           for (const p of this.pending.values()) {
