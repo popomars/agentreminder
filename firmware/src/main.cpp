@@ -6,7 +6,7 @@
 #include <ArduinoJson.h>
 #include "ui.h"
 
-#define FW_VERSION "0.2.1"
+#define FW_VERSION "0.2.2"
 #define TCP_PORT 47322
 #define HOSTNAME "agentreminder"
 
@@ -14,7 +14,6 @@ static WiFiServer server(TCP_PORT);
 static WiFiClient client;
 static Preferences prefs;
 static String usbBuf, tcpBuf;
-static uint32_t usbSeen = 0, tcpSeen = 0;   // last message time per channel
 static bool mdnsUp = false;
 
 static String deviceId() {
@@ -50,7 +49,6 @@ static void handle(const String &line, uint8_t ch) {
   JsonDocument m;
   if (deserializeJson(m, line)) return;
   const char *t = m["t"] | "";
-  if (ch == CH_USB) usbSeen = millis(); else tcpSeen = millis();
 
   if (!strcmp(t, "hello")) {
     JsonDocument r;
@@ -63,12 +61,12 @@ static void handle(const String &line, uint8_t ch) {
     JsonDocument r; r["t"] = "pong"; r["ts"] = m["ts"]; sendOn(ch, r);
   } else if (!strcmp(t, "approval") || !strcmp(t, "notify")) {
     Item it;
-    it.id = m["id"] | ""; it.agent = m["agent"] | "agent"; it.project = m["project"] | "";
+    it.id = m["id"] | ""; it.agent = m["agent"] | "agent";
     it.conversation = m["conversation"] | "未命名对话"; it.reason = m["reason"] | "";
-    it.title = m["title"] | ""; it.detail = m["detail"] | ""; it.channels = ch; it.at = millis();
+    it.title = m["title"] | ""; it.channels = ch; it.at = millis();
     it.timeoutMs = constrain(m["timeout"] | 90, 1, 3600) * 1000UL;
-    if (!strcmp(t, "approval")) { it.kind = "approval"; ui_add_approval(it); }
-    else { it.kind = m["kind"] | "info"; ui_add_notify(it); }
+    if (!strcmp(t, "approval")) ui_add_approval(it);
+    else ui_add_notify(it);
   } else if (!strcmp(t, "resolved") || !strcmp(t, "cancel")) {
     ui_remove(m["id"] | "");
   } else if (!strcmp(t, "wifi")) {
@@ -111,13 +109,6 @@ void loop() {
     if (client && client.connected()) pump(client, tcpBuf, CH_WIFI);
   }
 
-  static uint32_t lastStatus = 0;
-  if (millis() - lastStatus > 1000) {
-    lastStatus = millis();
-    const bool usbHost = usbSeen && millis() - usbSeen < 40000;     // host pings every 15 s
-    const bool wifiHost = client && client.connected() && tcpSeen && millis() - tcpSeen < 40000;
-    ui_set_status(usbHost, wifiUp, wifiUp ? WiFi.localIP().toString() : "", wifiHost);
-  }
   ui_loop();
   delay(5);
 }

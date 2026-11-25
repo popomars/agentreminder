@@ -315,7 +315,7 @@ function runDaemon() {
     if (!response && prompted.has(target)) return { error: 'already-prompted' };
     prompted.add(target);
     const { id, promise } = hub.requestApproval({
-      agent: 'setup', conversation: 'AgentReminder', title: '配对这台电脑',
+      agent: 'setup', conversation: clip(os.hostname(), 100), title: '配对这台电脑',
       detail: `主机：${clip(os.hostname(), 100)}\n请按右键同意配对，或按左键拒绝。`,
     }, 60000, target);
     response?.on('close', () => { if (!response.writableEnded) hub.cancel(id, 'pairing-client-gone'); });

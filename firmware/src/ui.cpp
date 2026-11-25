@@ -9,9 +9,9 @@ static BoardDisplay lcd;
 static lv_display_t *disp;
 static std::vector<Item> approvals;   // oldest first
 static std::vector<Item> notes;       // newest first, max 20
-static lv_obj_t *statusLbl, *content, *toast;
+static lv_obj_t *content;
 static bool dirty = true;
-static uint32_t toastUntil = 0, dimAt = 0;
+static uint32_t dimAt = 0;
 
 LV_FONT_DECLARE(agentreminder_cjk_26);
 static lv_font_t fontCn;
@@ -53,18 +53,6 @@ static lv_obj_t *label(lv_obj_t *parent, const String &txt, lv_color_t col, bool
   lv_label_set_text(l, txt.c_str());
   if (wrap) { lv_obj_set_width(l, lv_pct(100)); lv_label_set_long_mode(l, LV_LABEL_LONG_WRAP); }
   return l;
-}
-
-static lv_obj_t *chip(lv_obj_t *parent, const String &agent) {
-  lv_obj_t *c = lv_obj_create(parent);
-  lv_obj_remove_style_all(c);
-  lv_obj_set_size(c, LV_SIZE_CONTENT, LV_SIZE_CONTENT);
-  lv_obj_set_style_bg_color(c, agentColor(agent), 0);
-  lv_obj_set_style_bg_opa(c, LV_OPA_COVER, 0);
-  lv_obj_set_style_radius(c, 6, 0);
-  lv_obj_set_style_pad_hor(c, 6, 0); lv_obj_set_style_pad_ver(c, 2, 0);
-  label(c, agent, lv_color_white(), false);
-  return c;
 }
 
 static void decide(const char *decision) {
@@ -126,34 +114,17 @@ static void buildApproval() {
   Serial.printf("{\"t\":\"log\",\"msg\":\"render approval %s\"}\n", it.id.c_str());
   lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
 
-  const String headline = it.reason.length() ? it.reason : it.title;
-  lv_obj_t *subject = label(content, headline, lv_color_hex(0xFFD369));
-  lv_label_set_long_mode(subject, LV_LABEL_LONG_DOT);
-  lv_obj_set_style_max_height(subject, 102, 0);
+  lv_obj_t *summary = lv_obj_create(content);
+  lv_obj_remove_style_all(summary);
+  lv_obj_set_width(summary, lv_pct(100));
+  lv_obj_set_flex_grow(summary, 1);
+  lv_obj_set_flex_flow(summary, LV_FLEX_FLOW_COLUMN);
+  lv_obj_set_style_pad_row(summary, 18, 0);
+  lv_obj_add_flag(summary, LV_OBJ_FLAG_SCROLLABLE);
+  lv_obj_set_scroll_dir(summary, LV_DIR_VER);
 
-  lv_obj_t *row = lv_obj_create(content);
-  lv_obj_remove_style_all(row);
-  lv_obj_set_size(row, lv_pct(100), LV_SIZE_CONTENT);
-  lv_obj_set_flex_flow(row, LV_FLEX_FLOW_ROW);
-  lv_obj_set_style_pad_column(row, 8, 0);
-  lv_obj_set_flex_align(row, LV_FLEX_ALIGN_START, LV_FLEX_ALIGN_CENTER, LV_FLEX_ALIGN_CENTER);
-  chip(row, it.agent);
-  lv_obj_t *conversation = label(row, it.conversation, lv_color_hex(0xD2D2D2), false);
-  lv_obj_set_flex_grow(conversation, 1);
-  lv_label_set_long_mode(conversation, LV_LABEL_LONG_DOT);
-
-  lv_obj_t *box = lv_obj_create(content);
-  lv_obj_set_width(box, lv_pct(100));
-  lv_obj_set_flex_grow(box, 1);
-  lv_obj_set_style_bg_color(box, lv_color_hex(0x1E1E1E), 0);
-  lv_obj_set_style_bg_opa(box, LV_OPA_TRANSP, 0);
-  lv_obj_set_style_border_width(box, 0, 0);
-  lv_obj_set_style_pad_all(box, 2, 0);
-  lv_obj_add_flag(box, LV_OBJ_FLAG_SCROLLABLE);
-  lv_obj_set_scroll_dir(box, LV_DIR_VER);
-  if (it.detail.length() && it.detail != headline) {
-    label(box, it.detail, lv_color_hex(0xF0F0F0));
-  }
+  label(summary, it.reason.length() ? it.reason : it.title, lv_color_hex(0xFFD369));
+  if (it.conversation.length()) label(summary, it.conversation, lv_color_white());
 
   lv_obj_t *btns = lv_obj_create(content);
   lv_obj_remove_style_all(btns);
@@ -167,11 +138,6 @@ static void buildApproval() {
 
 static void buildNotes() {
   lv_obj_set_flex_flow(content, LV_FLEX_FLOW_COLUMN);
-  if (notes.empty()) {
-    lv_obj_t *l = label(content, LV_SYMBOL_OK "  一切就绪\n等待 agent 消息…", lv_color_hex(0xC7C7C7));
-    lv_obj_set_style_text_align(l, LV_TEXT_ALIGN_CENTER, 0);
-    return;
-  }
   for (size_t i = 0; i < notes.size(); i++) {
     const Item &n = notes[i];
     lv_obj_t *card = lv_obj_create(content);
@@ -183,9 +149,8 @@ static void buildNotes() {
     lv_obj_set_style_pad_all(card, 6, 0);
     lv_obj_set_flex_flow(card, LV_FLEX_FLOW_COLUMN);
     lv_obj_add_event_cb(card, onDismiss, LV_EVENT_CLICKED, (void *)(uintptr_t)i);
-    const char *icon = n.kind == "done" ? LV_SYMBOL_OK " " : n.kind == "idle" ? LV_SYMBOL_BELL " " : LV_SYMBOL_BELL " ";
-    label(card, String(icon) + n.agent + " · " + n.conversation + "  " + n.title, lv_color_white());
-    if (n.detail.length()) label(card, n.detail, lv_color_hex(0xD2D2D2));
+    label(card, n.title, lv_color_white());
+    if (n.conversation.length()) label(card, n.conversation, lv_color_hex(0xD2D2D2));
   }
 }
 
@@ -193,13 +158,6 @@ static void rebuild() {
   lv_obj_clean(content);
   if (!approvals.empty()) buildApproval(); else buildNotes();
   dirty = false;
-}
-
-static void showToast(const String &txt) {
-  lv_label_set_text(lv_obj_get_child(toast, 0), txt.c_str());
-  lv_obj_remove_flag(toast, LV_OBJ_FLAG_HIDDEN);
-  lv_obj_move_foreground(toast);
-  toastUntil = millis() + 3500;
 }
 
 /* ---------------- public ---------------- */
@@ -252,9 +210,6 @@ void ui_init() {
   lv_obj_set_style_pad_all(scr, 22, 0);
   lv_obj_set_style_pad_row(scr, 6, 0);
 
-  statusLbl = label(scr, "AgentReminder", lv_color_hex(0xC7C7C7));
-  lv_obj_set_style_text_font(statusLbl, &lv_font_montserrat_22, 0);
-
   content = lv_obj_create(scr);
   lv_obj_remove_style_all(content);
   lv_obj_set_width(content, lv_pct(100));
@@ -262,13 +217,6 @@ void ui_init() {
   lv_obj_set_style_pad_row(content, 6, 0);
   lv_obj_add_flag(content, LV_OBJ_FLAG_SCROLLABLE);
 
-  toast = lv_obj_create(lv_layer_top());
-  lv_obj_set_size(toast, lv_pct(92), LV_SIZE_CONTENT);
-  lv_obj_align(toast, LV_ALIGN_TOP_MID, 0, 30);
-  lv_obj_set_style_bg_color(toast, lv_color_hex(0x2D7FF9), 0);
-  lv_obj_set_style_border_width(toast, 0, 0);
-  label(toast, "", lv_color_white());
-  lv_obj_add_flag(toast, LV_OBJ_FLAG_HIDDEN);
   rebuild();
 }
 
@@ -284,7 +232,6 @@ void ui_loop() {
   if (denied) decide("deny");
   else if (allowed) decide("allow");
   if (dirty) rebuild();
-  if (toastUntil && millis() > toastUntil) { lv_obj_add_flag(toast, LV_OBJ_FLAG_HIDDEN); toastUntil = 0; }
   if (dimAt && millis() > dimAt && approvals.empty()) { lcd.setBrightness(30); dimAt = 0; }
   lv_timer_handler();
 }
@@ -300,18 +247,9 @@ void ui_add_notify(const Item &it) {
   notes.insert(notes.begin(), it);
   if (notes.size() > 20) notes.pop_back();
   wake(); dirty = true;
-  if (!approvals.empty()) showToast(it.agent + " · " + it.title);   // don't hide the pending card
 }
 
 void ui_remove(const String &id) {
   for (size_t i = 0; i < approvals.size(); i++)
     if (approvals[i].id == id) { approvals.erase(approvals.begin() + i); dirty = true; return; }
-}
-
-void ui_set_status(bool usb, bool wifiUp, const String &ip, bool hostWifi) {
-  String s = "AgentReminder   ";
-  s += usb ? LV_SYMBOL_USB " USB  " : "";
-  if (wifiUp) { s += LV_SYMBOL_WIFI " "; s += ip; s += hostWifi ? " " LV_SYMBOL_OK : ""; }
-  else s += LV_SYMBOL_WIFI " --";
-  lv_label_set_text(statusLbl, s.c_str());
 }

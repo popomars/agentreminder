@@ -5,7 +5,7 @@
 enum : uint8_t { CH_USB = 1, CH_WIFI = 2 };
 
 struct Item {
-  String id, agent, project, conversation, reason, title, detail, kind;  // kind: approval | done | idle | info
+  String id, agent, conversation, reason, title;
   uint8_t channels = 0;
   uint32_t at = 0, timeoutMs = 90000;
 };
@@ -18,6 +18,5 @@ void ui_loop();
 void ui_add_approval(const Item &it);
 void ui_add_notify(const Item &it);
 void ui_remove(const String &id);
-void ui_set_status(bool usb, bool wifiUp, const String &ip, bool hostWifi);
 
 bool ui_font_ok();
