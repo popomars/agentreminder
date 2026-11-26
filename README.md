@@ -80,6 +80,12 @@ Codex 桌面端通过上述双端配置接入原生问题、MCP 表单及需要�
 
 `bash install.sh --agent dsh` 会生成 dsh 的 hook 文件。dsh 还需要在你的 profile 中安装并配置 Claude Code hooks 桥接。将安装目录内 [Cordis 配置示例](integrations/dsh/cordis.patch.yml) 合并到对应 profile，并把 `configPath` 指向 `~/.agentreminder/dsh-hooks.json` 的绝对路径。桥接使用 `PreToolUse`，其同意行为还受 dsh 自身权限策略约束。
 
+## macOS 菜单栏
+
+在此仓库运行 `bash install.sh --menu-bar`。菜单栏应用需要 macOS 13 或更新版本及 Xcode 命令行工具。安装后，在访达打开「应用程序」中的用户应用目录（`~/Applications`），双击 **AgentReminder**。应用会自动连接或启动本机服务。首次使用蓝牙时，请允许 macOS 的蓝牙访问提示。已有安装可运行 `bash install.sh --menu-bar --skip-hooks --no-pair`，保留现有 hooks 和配对设置。
+
+顶部铃铛旁显示未读通知和待审批数量。点击铃铛可打开通知与审批列表，点开一条通知即标为已读，也可一次标记全部。记录保留在本次服务运行期间，最多 100 条。要添加设备，用 USB 数据线接入已刷固件的设备，在菜单里选择「配对新设备」，再按设备屏幕上的提示确认。
+
 ## 微雪通知音
 
 微雪 ESP32-S3-Touch-AMOLED-2.16 收到新的审批、问题或通知时，板载扬声器响两声短提示音。同一张卡经 USB 和蓝牙送达时合并为一组提示音，连续通知共用 1 秒的播放间隔。
@@ -111,6 +117,33 @@ macOS 上首次用 USB 配对后，打开系统蓝牙。如果 macOS 询问蓝�
 2. 设备显示「配对这台电脑」时核对电脑名，按「同意」对应的实体键。macOS 如询问蓝牙权限，请允许。空闲页显示新主机名和「蓝牙已连接」后可以拔线，设备须保持供电。
 
 设备保存一台电脑的蓝牙配对，新配对会替换旧配对。换机时可以先关闭旧电脑的蓝牙，避免它同时尝试重连。
+
+## 多台电脑与多个设备
+
+在每台电脑上从这个分支运行相同的 `bash install.sh`。各自绑定的 USB 或蓝牙设备继续使用现有固件。纯发起端可以用 `--no-pair` 安装，并单独启动服务。
+
+在每台电脑的 `~/.agentreminder/config.json` 中合并以下字段，保留原有配对配置。所有参加的电脑使用同一把密钥。服务会通过 `tailscale status --json` 自动读取本机地址和在线对端，每 10 秒刷新。新增电脑后不需要修改其他电脑的配置。成员之间需能访问 TCP `47323`。 [Tailscale CLI](https://tailscale.com/docs/reference/tailscale-cli)
+
+```json
+{
+  "tailnet": {
+    "enabled": true,
+    "key": "替换为这组电脑共享的 64 个小写十六进制字符"
+  }
+}
+```
+
+在一台可信电脑上运行 `node -p "require('node:crypto').randomBytes(32).toString('hex')"` 生成一次密钥。通过私密渠道给参加的电脑配置相同的值，并将配置文件权限设为 `600`。服务先验证对端也持有密钥，再发送卡片。已有手动配置可删除 `listen` 和 `peers`，重启服务后切换为自动发现。
+
+配置后，每台电脑运行下面的命令。重启电脑后需重新启动服务。看到 `tailnet.listening: true` 后，可从任意成员运行 `node ~/.agentreminder/app/host/agentreminder.js test` 发测试卡。
+
+```bash
+node ~/.agentreminder/app/host/agentreminder.js stop
+node ~/.agentreminder/app/host/agentreminder.js start
+node ~/.agentreminder/app/host/agentreminder.js status
+```
+
+服务会将它收到的通知、审批和可交互问题推送到所有在线成员的已绑定设备，发起电脑自己可以没有设备。最先到达发起服务的有效答复生效，其余设备撤下卡片。设备上的「回电脑继续」交回原对话。离线期间的通知不会补发，agent 仍遵循各自的 hook 和权限能力。每台电脑可绑定多块板。
 
 ## 停用或卸载主机服务
 

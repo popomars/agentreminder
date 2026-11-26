@@ -111,10 +111,31 @@ Keep one host daemon with a per-board enrollment key. Accept legacy single-board
 settings so existing enrollments survive an upgrade. Send each request ID to
 all eligible links and broadcast its first resolution to the connected devices.
 
-### ADR-0007: Share the ES8311 notification player across boards
+### ADR-0007: Mirror cards directly between selected Tailnet peers
+
+- Date: 2026-11-25
+- Status: Accepted
+
+Every participating computer runs the same daemon and connects directly to its
+peer list, discovered through Tailscale by default. Both peers prove possession
+of the shared key before any card is sent. The source daemon owns the response
+to its agent. Receivers serve cards locally without forwarding them. A separate
+Tailnet listener keeps hook administration and pairing on loopback.
+
+### ADR-0008: Show AgentReminder in the macOS menu bar
 
 - Date: 2026-11-26
-- Status: Accepted on the Waveshare sound branch
+- Status: Accepted
+
+The optional native app starts or connects to the host daemon on loopback.
+The daemon owns unread counts and retains up to 100 notifications in memory
+for its current run. The app uses the existing USB pairing endpoint and the
+same device confirmation as the command-line flow.
+
+### ADR-0009: Share the ES8311 notification player across boards
+
+- Date: 2026-11-26
+- Status: Accepted
 
 Both firmware targets use one background playback task and trigger it after
 the card queue accepts a new approval, question, or notification. Each board

@@ -1,10 +1,15 @@
 'use strict';
 
 const fs = require('node:fs');
+const os = require('node:os');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
-const { stopLocalDaemon, HOME_DIR, hookSettings } = require('./agentreminder');
+const { stopLocalDaemon, HOME_DIR, hookSettings, shellQuote } = require('./agentreminder');
 const { uninstallIfInstalled } = require('./configure-codex-dock');
+const defaultState = path.join(os.homedir(), '.agentreminder');
+const customInstallation = path.resolve(HOME_DIR) !== defaultState;
+const installedCommandPath = shellQuote(path.resolve(HOME_DIR, 'app', 'host', 'agentreminder.js'));
+
 let english = false;
 function say(chinese, translation) { console.log(english ? translation : chinese); }
 
@@ -28,7 +33,8 @@ function hookEdits(agent, file) {
     for (const group of groups) {
       if (!Array.isArray(group?.hooks)) { remaining.push(group); continue; }
       const kept = group.hooks.filter(hook => hook?.type !== 'command' ||
-        typeof hook.command !== 'string' || hook.command.match(managedCommand)?.[1] !== agent);
+        typeof hook.command !== 'string' || hook.command.match(managedCommand)?.[1] !== agent ||
+        (customInstallation && !hook.command.includes(` ${installedCommandPath} hook --agent `)));
       const count = group.hooks.length - kept.length;
       removed += count;
       if (kept.length || !count) remaining.push(count ? { ...group, hooks: kept } : group);
@@ -49,16 +55,20 @@ function writeHooks({ target, mode, settings, removed }) {
 }
 
 const installedFiles = [
-  'host/agentreminder.js', 'host/bluetooth.js', 'host/bluetooth/agentreminder-bluetooth',
+  'host/agentreminder.js', 'host/tailnet.js', 'host/bluetooth.js', 'host/bluetooth/agentreminder-bluetooth',
   'host/codex-approval-proxy.js', 'host/codex-approval-cli', 'host/open-codex.sh', 'host/configure-codex-dock.js',
   'host/tools/hardware-check.js', 'integrations/dsh/cordis.patch.yml', 'flash.sh',
   ...['bootloader.bin', 'partitions.bin', 'boot_app0.bin', 'firmware.bin', 'SHA256SUMS']
     .map(file => `firmware/release/waveshare-amoled-2.16/${file}`),
   ...['AgentReminder-AI-Passport-app.bin', 'AgentReminder-AI-Passport-full.bin', 'SHA256SUMS']
     .map(file => `firmware/release/folotoy-ai-passport/${file}`),
+  ...['Info.plist', 'MacOS/AgentReminder', 'Resources/Installation.json', '_CodeSignature/CodeResources']
+    .map(file => `AgentReminder.app/Contents/${file}`),
   'host/uninstall.js', 'uninstall.sh',
 ];
 const installedDirs = ['', 'host', 'host/bluetooth', 'host/tools', 'integrations', 'integrations/dsh',
+  'AgentReminder.app', 'AgentReminder.app/Contents', 'AgentReminder.app/Contents/MacOS',
+  'AgentReminder.app/Contents/Resources', 'AgentReminder.app/Contents/_CodeSignature',
   'firmware', 'firmware/release', 'firmware/release/waveshare-amoled-2.16', 'firmware/release/folotoy-ai-passport']
   .map(dir => path.resolve(HOME_DIR, 'app', dir));
 
@@ -70,6 +80,9 @@ function checkInstalledDirectories() {
 }
 
 function removeRuntime() {
+  const shortcut = path.join(os.homedir(), 'Applications', 'AgentReminder.app');
+  if (fs.lstatSync(shortcut, { throwIfNoEntry: false })?.isSymbolicLink() &&
+      fs.readlinkSync(shortcut) === path.join(installedDirs[0], 'AgentReminder.app')) fs.unlinkSync(shortcut);
   for (const file of installedFiles) fs.rmSync(path.join(installedDirs[0], file), { force: true });
   for (const dir of installedDirs.slice().reverse()) {
     try { fs.rmdirSync(dir); }
@@ -92,7 +105,7 @@ async function main() {
 
   checkInstalledDirectories();
   const edits = Object.entries(hookSettings).map(([agent, file]) => hookEdits(agent, file)).filter(Boolean);
-  if (uninstallIfInstalled()) say('已撤销 AgentReminder 的 Dock 启动配置。', 'Removed the AgentReminder Dock configuration.');
+  if (!customInstallation && uninstallIfInstalled()) say('已撤销 AgentReminder 的 Dock 启动配置。', 'Removed the AgentReminder Dock configuration.');
   for (const edit of edits) writeHooks(edit);
   if (await stopLocalDaemon()) say('已停止本机 AgentReminder 服务。', 'Stopped the local AgentReminder daemon.');
   removeRuntime();
