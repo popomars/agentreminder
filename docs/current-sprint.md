@@ -36,6 +36,15 @@ notifications left the pending approval in place. Clearing both reset the two
 counts, withdrew the card from the physical device, and returned the approval
 to its originating client.
 
+The Agent integrations menu shows Codex Desktop approvals alongside the hook
+integrations, with shared status labels and enable/disable controls. Changing
+the Codex setting offers to reopen ChatGPT now or later.
+
+The Tailnet service menu provides separate Initialize, Join, and View shared
+key actions. The installer can open Initialize with `--init-tailnet`. A Mac
+already in a group can view and copy its saved key. Two isolated daemons
+exercise group setup and preserve their inboxes and service processes.
+
 The installer and menu support WorkBuddy Desktop. Its Stop hook forwards
 completion, and a command safety audit event produces a reminder to confirm
 in WorkBuddy. The menu switch controls both paths independently of other agents.

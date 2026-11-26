@@ -2,6 +2,7 @@
 
 const assert = require('node:assert/strict');
 const { once, EventEmitter } = require('node:events');
+const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const http = require('node:http');
 const os = require('node:os');
@@ -24,6 +25,95 @@ test('Tailnet configuration uses explicit IPv4 membership and a separate key', (
   for (const override of [{ listen }, { peers: ['192.168.1.1'] }, { peers: [config.listen] }, { key: 'short' }]) {
     assert.throws(() => validateConfig({ ...config, ...override }), /invalid Tailnet configuration/);
   }
+});
+
+test('local onboarding creates and joins a group without restarting either daemon', { timeout: 15000 }, async t => {
+  const fakeBin = fs.mkdtempSync(path.join(home, 'mock-tailscale-'));
+  fs.writeFileSync(path.join(fakeBin, 'tailscale'), `#!/bin/sh
+echo '{"BackendState":"Stopped"}'
+`, { mode: 0o700 });
+  const daemons = [];
+  t.after(async () => {
+    await Promise.all(daemons.map(async child => {
+      if (child.exitCode !== null || child.signalCode !== null) return;
+      const exited = once(child, 'exit');
+      child.kill();
+      await exited;
+    }));
+  });
+
+  async function startLocal(label) {
+    const state = fs.mkdtempSync(path.join(home, label));
+    const probe = http.createServer();
+    await once(probe.listen(0, listen), 'listening');
+    const httpPort = probe.address().port;
+    await new Promise(resolve => probe.close(resolve));
+    const configPath = path.join(state, 'config.json');
+    const config = { httpPort, usb: { enabled: false }, bluetooth: { enabled: false }, custom: label };
+    fs.writeFileSync(configPath, JSON.stringify(config));
+    const child = spawn(process.execPath, [path.resolve(__dirname, '../agentreminder.js'), 'daemon'], {
+      env: { ...process.env, AGENTREMINDER_HOME: state, PATH: `${fakeBin}:${process.env.PATH}` }, stdio: 'ignore',
+    });
+    daemons.push(child);
+    const address = `http://${listen}:${httpPort}`;
+    const get = route => fetch(address + route).then(r => r.json());
+    let inbox;
+    for (let i = 0; i < 70; i++) {
+      inbox = await get('/inbox').catch(() => null);
+      if (inbox?.canInitializeTailnet) break;
+      await sleep(40);
+    }
+    assert.equal(inbox?.canInitializeTailnet, true);
+    const tokenPath = path.join(state, 'menu-setup.token');
+    assert.equal(fs.statSync(tokenPath).mode & 0o777, 0o600);
+    const token = fs.readFileSync(tokenPath, 'utf8').trim();
+    const post = (route, data, headers) => fetch(address + route, {
+      method: 'POST', headers: { 'content-type': 'application/json', ...headers }, body: JSON.stringify(data),
+    });
+    const setup = (data, headers = { 'x-agentreminder-setup': token }) => post('/tailnet/setup', data, headers);
+    return { config, configPath, get, post, setup, token, pid: child.pid };
+  }
+
+  const [first, second] = await Promise.all([startLocal('create-'), startLocal('join-')]);
+  await first.post('/inbox/test', { lang: 'en' });
+  const noteId = (await first.get('/inbox')).notifications[0].id;
+
+  assert.equal((await first.setup({ mode: 'create' }, {})).status, 403);
+  assert.equal((await first.setup({ mode: 'create' }, {
+    'x-agentreminder-setup': first.token, Origin: 'https://example.test',
+  })).status, 403);
+  assert.equal((await second.setup({ mode: 'join', key: 'bad key' })).status, 400);
+  assert.deepEqual(JSON.parse(fs.readFileSync(second.configPath, 'utf8')), second.config);
+
+  const created = await first.setup({ mode: 'create' });
+  assert.equal(created.status, 200);
+  assert.deepEqual(await created.json(), { ok: true });
+  const configA = JSON.parse(fs.readFileSync(first.configPath, 'utf8'));
+  assert.match(configA.tailnet.key, /^[0-9a-f]{64}$/);
+  assert.equal(fs.statSync(first.configPath).mode & 0o777, 0o600);
+  assert.deepEqual(configA, { ...first.config, tailnet: { enabled: true, key: configA.tailnet.key } });
+  assert.equal((await first.setup({ mode: 'create' })).status, 409);
+  assert.deepEqual(JSON.parse(fs.readFileSync(first.configPath, 'utf8')), configA);
+
+  const joined = await second.setup({ mode: 'join', key: ` ${configA.tailnet.key.toUpperCase()}\n` });
+  assert.equal(joined.status, 200);
+  assert.deepEqual(await joined.json(), { ok: true });
+  assert.deepEqual(JSON.parse(fs.readFileSync(second.configPath, 'utf8')),
+    { ...second.config, tailnet: configA.tailnet });
+  assert.equal((await second.setup({ mode: 'join', key })).status, 409);
+  assert.deepEqual(JSON.parse(fs.readFileSync(second.configPath, 'utf8')),
+    { ...second.config, tailnet: configA.tailnet });
+
+  for (const local of [first, second]) {
+    const status = await local.get('/status');
+    const inbox = await local.get('/inbox');
+    assert.equal(status.pid, local.pid);
+    assert.equal(status.tailnet.automatic, true);
+    assert.equal(inbox.tailnetConfigured, true);
+    assert.equal(inbox.tailnetListening, false);
+    assert(!JSON.stringify({ status, inbox }).includes(configA.tailnet.key));
+  }
+  assert.equal((await first.get('/inbox')).notifications[0].id, noteId);
 });
 
 function attach(hub, name) {

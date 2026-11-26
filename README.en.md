@@ -37,12 +37,12 @@ To move a board to a new Mac, connect it by USB and pair from the bell on the ne
 
 ### 3. Connect your agent
 
-The installer sets up hooks for detected Codex, Claude Code, dsh, and WorkBuddy installations and preserves other hooks. If you install WorkBuddy later, choose **Agent integrations → WorkBuddy → Enable** in the bell menu or run `bash install.sh --agent workbuddy`.
+The installer sets up hooks for detected Codex, Claude Code, dsh, and WorkBuddy installations and preserves other hooks. After installing another agent, enable a supported integration from **Agent integrations** or rerun setup, for example with `bash install.sh --agent workbuddy`.
 
 | Agent | After installation |
 | --- | --- |
 | Codex CLI | Reopen Codex and use `/hooks` to review and trust the AgentReminder hooks. |
-| Codex Desktop | Choose **Codex Desktop approvals → Enable…** in the bell menu. Quit ChatGPT completely, then reopen it from the usual Dock icon. Use manual approval and set the reviewer to the user. |
+| Codex Desktop | Choose **Agent integrations → Codex Desktop approvals → Enable** from the bell, then choose **Restart Now** or **Reopen Later**. Use manual approval and set the reviewer to the user. |
 | Claude Code | Open a new session. AgentReminder supports `AskUserQuestion` and, on version 2.1.76 or later, `Elicitation`. |
 | dsh | Install the Claude Code hooks bridge in your profile, merge the Cordis example, and set `configPath` to the absolute path of `~/.agentreminder/dsh-hooks.json`. [Cordis configuration](integrations/dsh/cordis.patch.yml) |
 | WorkBuddy (macOS) | Reopen WorkBuddy. Task completions are forwarded automatically. When a command triggers WorkBuddy's local security approval, the device prompts you to return to WorkBuddy to confirm. Approval reminders appear under **Notifications**. |
@@ -58,9 +58,10 @@ After a real task finishes, open the bell to view the notification. Respond to a
 | **Pair a new device…** | Adds or re-pairs a board over USB. |
 | **Install or update firmware…** | Installs the bundled firmware for the selected model. Keep USB connected while writing. Paired boards reconnect after restarting. |
 | **Send test notification** | Checks delivery to the menu and local devices. |
-| **Agent integrations** | Enables or disables WorkBuddy independently. Disabling it pauses new WorkBuddy completions and approval reminders. |
+| **Tailnet service** | **Initialize** creates and copies a new group key. **Join Tailnet service** uses an existing group key. **View shared key** displays or copies the saved key. |
+| **Agent integrations** | Shows the status of Codex Desktop approvals, Claude Code, dsh, and WorkBuddy. Each integration can be enabled or disabled independently. Codex changes apply after reopening ChatGPT. |
 | **Launch at login** | Appears as AgentReminder in macOS Login Items & Extensions. It starts the bell and local service, and restores the Codex Dock configuration when enabled. |
-| **Codex Desktop approvals** | Appears when a supported ChatGPT Desktop installation is found. Enable or disable the integration, then reopen the app from the usual Dock icon. If ChatGPT opens before the bell at login, reopen ChatGPT. |
+| **Check for updates…** | Checks the version and commit on GitHub `main` and opens the current installation guide. |
 
 The board shows one approval at a time with a five-minute default deadline. For a question with two preset answers, use the indicated buttons. Return to the original conversation for extra choices, text input, or authentication. Press **PWR** briefly on Waveshare or the bottom function button on Passport in portrait orientation to hand a question back.
 
@@ -86,9 +87,21 @@ On Linux, run the same installer and connect by USB. Use `--no-menu-bar` for a h
 
 ## Multiple computers and devices
 
-Install the same service on each computer with `bash install.sh`. Keep the current firmware on paired USB or Bluetooth devices. A computer that only sends events can install with `--no-menu-bar --no-pair` and start the service separately.
+Connect the Macs to the same Tailnet.
 
-Merge the following into each computer's `~/.agentreminder/config.json`, keeping existing pairing settings. Use the same key on each member. The daemon uses `tailscale status --json` to discover its local address and online peers every 10 seconds. Adding a computer requires no edits on existing members. Allow TCP port `47323` between participants. [Tailscale CLI](https://tailscale.com/docs/reference/tailscale-cli)
+1. On the first Mac, choose **Tailnet service → Initialize**. AgentReminder creates and saves a shared key and copies it to the clipboard.
+2. On each other Mac, choose **Tailnet service → Join Tailnet service** and paste the same key.
+3. On any configured Mac, choose **Tailnet service → View shared key** to display or copy the key again. Initialize and Join are disabled once you have a group.
+
+Run `bash install.sh --init-tailnet` to open initialization during installation. When installing from GitHub, append `--init-tailnet` to the line that runs the downloaded script. This option requires the macOS menu bar app version 0.5.8 or later. On a configured Mac, it opens the saved key.
+
+Tailscale discovers computer addresses automatically. The service authenticates peers with the shared key before forwarding cards. Allow TCP port `47323` between group members. Enabling the Tailnet service from the menu keeps existing notifications, approvals, and device pairings. [Tailscale CLI](https://tailscale.com/docs/reference/tailscale-cli)
+
+### Headless hosts
+
+A computer that only sends events can install with `--no-menu-bar --no-pair` and start the service separately.
+
+Merge the following into each computer's `~/.agentreminder/config.json`, keeping existing pairing settings. Use the same key on each member. The daemon uses `tailscale status --json` to discover its local address and online peers every 10 seconds. Adding a computer requires no edits on existing members.
 
 ```json
 {
@@ -101,7 +114,7 @@ Merge the following into each computer's `~/.agentreminder/config.json`, keeping
 
 Generate one key with `node -p "require('node:crypto').randomBytes(32).toString('hex')"`. Share it privately and set the config file's permissions to `600`. The daemon verifies that a peer holds the key before sending a card. To migrate from manual configuration, remove `listen` and `peers` together, then restart.
 
-Run the following on every computer after configuration. On macOS, reopen AgentReminder from Applications after rebooting. When `tailnet.listening` is true, use `node ~/.agentreminder/app/host/agentreminder.js test` on any member to send sample cards.
+Run the following after configuring the service manually. When `tailnet.listening` is true, use `node ~/.agentreminder/app/host/agentreminder.js test` on any member to send sample cards.
 
 ```bash
 node ~/.agentreminder/app/host/agentreminder.js stop

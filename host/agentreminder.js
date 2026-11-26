@@ -26,11 +26,12 @@ const bluetooth = require('./bluetooth');
 const tailnet = require('./tailnet');
 const workbuddy = require('./workbuddy');
 
-const VERSION = '0.5.7';
+const VERSION = '0.5.8';
 const UNKNOWN_CONVERSATION = '未命名对话';
 const HOME_DIR = process.env.AGENTREMINDER_HOME || path.join(os.homedir(), '.agentreminder');
 const CONFIG_PATH = path.join(HOME_DIR, 'config.json');
 const LOG_PATH = path.join(HOME_DIR, 'daemon.log');
+const INTEGRATION_AGENTS = ['claude', 'dsh', 'workbuddy'];
 const WORKBUDDY_DIR = path.join(os.homedir(), '.workbuddy');
 const INBOX_HANDOFF_PATH = path.join(HOME_DIR, 'inbox-upgrade.json');
 
@@ -514,7 +515,7 @@ function runDaemon() {
     const reply = (code, obj) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)); };
     try {
       if (req.headers.origin) return reply(403, { error: 'browser requests are not supported' });
-      if (req.url === '/inbox' || req.url === '/inbox/read' || req.url === '/inbox/clear' || req.url === '/inbox/test' || req.url === '/firmware/prepare' || req.url === '/agent-integrations') {
+      if (req.url === '/inbox' || req.url === '/inbox/read' || req.url === '/inbox/clear' || req.url === '/inbox/test' || req.url === '/firmware/prepare' || req.url === '/tailnet/setup' || req.url === '/agent-integrations') {
         if (!/^(127\.0\.0\.1|localhost)(:\d+)?$/i.test(req.headers.host || '')) {
           return reply(403, { error: 'endpoint requires a loopback host' });
         }
@@ -529,8 +530,9 @@ function runDaemon() {
         for (const [id, { card }] of mesh?.outgoing || []) approvals.set(id, card);
         return reply(200, {
           canClear: true, canUpdateFirmware: true, canSendTest: true, groupsNotifications: true,
+          canInitializeTailnet: !!setupToken, tailnetConfigured: !!mesh, tailnetListening: mesh?.status().listening ?? false,
           canManageIntegrations: !!setupToken,
-          agentIntegrations: { workbuddy: workbuddyStatus(cfg) },
+          agentIntegrations: Object.fromEntries(INTEGRATION_AGENTS.map(agent => [agent, integrationStatus(cfg, agent)])),
           notifications, unread: notifications.filter(note => note.unread).length,
           approvals: [...approvals.values()].map(inboxCard),
           devices: new Set(hub.readyLinks().map(link => link.info.id)).size });
@@ -578,20 +580,35 @@ function runDaemon() {
           detail: english ? 'AgentReminder received your test notification.' : 'AgentReminder 已收到测试通知。' });
         return reply(200, { delivered });
       }
+      if (req.url === '/tailnet/setup') {
+        if (!authorizedSetup(req)) return reply(403, { error: 'unauthorized' });
+        if (mesh) return reply(409, { error: 'already-configured' });
+        const key = body?.mode === 'create' ? crypto.randomBytes(32).toString('hex')
+          : body?.mode === 'join' && typeof body.key === 'string' ? body.key.trim().toLowerCase() : '';
+        if (!/^[0-9a-f]{64}$/.test(key)) return reply(400, { error: 'invalid-key' });
+        const config = readSavedConfig();
+        const settings = { ...config.tailnet, enabled: true, key };
+        const verified = tailnet.validateConfig(settings);
+        writePrivateFile(CONFIG_PATH, JSON.stringify({ ...config, tailnet: settings }, null, 2) + '\n');
+        mesh = tailnet.createMesh(verified, hub, log);
+        meshConfigError = undefined;
+        mesh.start();
+        return reply(200, { ok: true });
+      }
       if (req.url === '/agent-integrations') {
         if (!authorizedSetup(req)) return reply(403, { error: 'unauthorized' });
         const { agent, enabled } = body || {};
-        if (agent !== 'workbuddy' || typeof enabled !== 'boolean') {
+        if (!INTEGRATION_AGENTS.includes(agent) || typeof enabled !== 'boolean') {
           return reply(400, { error: 'invalid-integration' });
         }
         const config = readSavedConfig();
-        const installedHooks = enabled && !workbuddyHasHook();
+        const installedHooks = enabled && !integrationHasHooks(agent);
         if (installedHooks) install(agent, () => {});
         const agentIntegrations = { ...config.agentIntegrations, [agent]: enabled };
         writePrivateFile(CONFIG_PATH, JSON.stringify({ ...config, agentIntegrations }, null, 2) + '\n');
         cfg.agentIntegrations = agentIntegrations;
-        workbuddyApprovals.setEnabled(enabled);
-        return reply(200, { status: workbuddyStatus(cfg), ...(installedHooks ? { installedHooks } : {}) });
+        if (agent === 'workbuddy') workbuddyApprovals.setEnabled(enabled);
+        return reply(200, { status: integrationStatus(cfg, agent), ...(installedHooks ? { installedHooks } : {}) });
       }
       if (req.url === '/firmware/prepare') {
         if (!firmwareUpdateActive()) return reply(409, { error: 'firmware-update-inactive' });
@@ -621,6 +638,7 @@ function runDaemon() {
         const seconds = Number(body.timeoutSec || cfg.approvalTimeoutSec);
         const timeoutMs = Math.round(Math.max(5, Math.min(Number.isFinite(seconds) ? seconds : 300, 3600)) * 1000);
         const info = { ...body.info, interaction: req.url === '/interaction' };
+        if (!integrationAllowed(cfg, info.agent)) return reply(200, { decision: null, reason: 'agent-disabled' });
         if (mesh) return reply(200, await mesh.approval(info, timeoutMs, res));
         const { id, promise } = hub.requestApproval(info, timeoutMs);
         // If the hook process dies (agent cancelled / user hit Esc), clear the card on the device.
@@ -664,7 +682,7 @@ function runDaemon() {
     usb = startUsb(hub, cfg);
     startWifi(hub, cfg);
     mesh?.start();
-    workbuddyApprovals.setEnabled(workbuddyStatus(cfg) === 'enabled');
+    workbuddyApprovals.setEnabled(integrationStatus(cfg, 'workbuddy') === 'enabled');
     setInterval(() => {
       const devices = hub.pairings();
       const upgrade = cfg.bluetooth.enabled && bluetooth.available() &&
@@ -1031,7 +1049,7 @@ async function runHook(argv) {
 /* -------------------------------- CLI ------------------------------- */
 
 function integrationAllowed(config, agent) {
-  return agent !== 'workbuddy' || config.agentIntegrations?.workbuddy !== false;
+  return !INTEGRATION_AGENTS.includes(agent) || config.agentIntegrations?.[agent] !== false;
 }
 
 function mergeHooks(file, hooks, agent) {
@@ -1040,15 +1058,14 @@ function mergeHooks(file, hooks, agent) {
   if (!cur || typeof cur !== 'object' || Array.isArray(cur)) throw new Error('Invalid settings: ' + file);
   cur.hooks = cur.hooks || {};
   for (const [ev, groups] of Object.entries(hooks)) {
-    const existing = cur.hooks[ev] || [];
-    const keep = agent
-      ? existing.flatMap(group => {
-        if (!Array.isArray(group?.hooks)) return [group];
-        const rules = group.hooks.filter(hook => managedHookAgent(hook) !== agent);
-        if (rules.length === group.hooks.length) return [group];
-        return rules.length ? [{ ...group, hooks: rules }] : [];
-      })
-      : existing.filter(group => !JSON.stringify(group).includes('agentreminder.js'));
+    const newCommands = new Set(groups.flatMap(group => group.hooks.map(hook => hook.command)).filter(command => typeof command === 'string'));
+    const keep = (cur.hooks[ev] || []).flatMap(group => {
+      if (!Array.isArray(group?.hooks)) return [group];
+      const rules = group.hooks.filter(hook =>
+        !newCommands.has(hook?.command) && !(agent && managedHookAgent(hook) === agent));
+      if (rules.length === group.hooks.length) return [group];
+      return rules.length ? [{ ...group, hooks: rules }] : [];
+    });
     if (keep.length || groups.length) cur.hooks[ev] = [...keep, ...groups];
     else delete cur.hooks[ev];
   }
@@ -1075,18 +1092,21 @@ function managedHookAgent(hook) {
   return hook?.type === 'command' && typeof hook.command === 'string' ? hook.command.match(managedCommand)?.[1] : undefined;
 }
 
-function workbuddyHasHook() {
+function integrationHasHooks(agent) {
   let file;
-  try { file = JSON.parse(fs.readFileSync(hookSettings.workbuddy, 'utf8')); }
+  try { file = JSON.parse(fs.readFileSync(hookSettings[agent], 'utf8')); }
   catch (error) { if (error.code === 'ENOENT') return false; throw error; }
-  const groups = file?.hooks?.Stop;
-  return Array.isArray(groups) && groups.some(group =>
-    Array.isArray(group?.hooks) && group.hooks.some(hook => managedHookAgent(hook) === 'workbuddy'));
+  const requiredEvents = agent === 'workbuddy' ? ['Stop'] : ['Stop', agent === 'claude' ? 'PermissionRequest' : 'PreToolUse'];
+  return requiredEvents.every(event => {
+    const groups = file?.hooks?.[event];
+    return Array.isArray(groups) && groups.some(group =>
+      Array.isArray(group?.hooks) && group.hooks.some(hook => managedHookAgent(hook) === agent));
+  });
 }
 
-function workbuddyStatus(config) {
-  if (!integrationAllowed(config, 'workbuddy')) return 'disabled';
-  try { return workbuddyHasHook() ? 'enabled' : 'unconfigured'; }
+function integrationStatus(config, agent) {
+  if (!integrationAllowed(config, agent)) return 'disabled';
+  try { return integrationHasHooks(agent) ? 'enabled' : 'unconfigured'; }
   catch (_) { return 'unavailable'; }
 }
 
@@ -1107,7 +1127,7 @@ function install(target, report = console.log) {
     const f = mergeHooks(hookSettings.codex, {
       PermissionRequest: [{ hooks: [t({ cmd: hookCmd('codex', 'permission'), timeout: appr })] }],
       Stop: [{ hooks: [t({ cmd: hookCmd('codex', 'stop'), timeout: 10 })] }],
-    });
+    }, target);
     report(`已写入 ${f}\n在 Codex 里运行 /hooks 审核并信任这些 hook。`);
   } else if (target === 'dsh') {
     const f = mergeHooks(hookSettings.dsh, {
@@ -1116,7 +1136,7 @@ function install(target, report = console.log) {
         { matcher: 'AskUserQuestion|ask_user_question', hooks: [t({ cmd: hookCmd('dsh', 'question'), timeout: 10 })] }],
       Notification: [{ matcher: 'agent_needs_input|elicitation_dialog|elicitation_url_dialog', hooks: [t({ cmd: hookCmd('dsh', 'notification'), timeout: 10 })] }],
       Stop: [{ hooks: [t({ cmd: hookCmd('dsh', 'stop'), timeout: 10 })] }],
-    });
+    }, target);
     report(`已写入 ${f}\n把 integrations/dsh/cordis.patch.yml 里的 configPath 指向它（见 README）。`);
   } else if (target === 'claude') {
     const elicitation = claudeElicitationSupported();
@@ -1128,7 +1148,7 @@ function install(target, report = console.log) {
       Notification: [{ matcher: elicitation ? notifications : `${notifications}|elicitation_dialog|elicitation_url_dialog`,
         hooks: [t({ cmd: hookCmd('claude', 'notification'), timeout: 10 })] }],
       Stop: [{ hooks: [t({ cmd: hookCmd('claude', 'stop'), timeout: 10 })] }],
-    });
+    }, target);
     report(`已写入 ${f}（推荐改用插件方式安装，见 README）`);
   } else if (target === 'workbuddy') {
     const f = mergeHooks(hookSettings.workbuddy, {
