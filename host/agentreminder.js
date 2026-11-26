@@ -75,6 +75,13 @@ function log(...args) {
 }
 
 const clip = (s, n) => { s = String(s ?? ''); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
+function inboxCard(payload) {
+  const { id, title, detail, reason, host, project, conversation, receivedTime } = payload;
+  return { id, title: clip(title, 180) || 'AgentReminder',
+    detail: clip(payload.t === 'approval' ? reason || detail : detail || reason, 500),
+    host: clip(host, 120), project: clip(project, 120), conversation: clip(conversation, 180),
+    receivedTime: clip(receivedTime, 24) };
+}
 function cardTime(ts) {
   const date = new Date(ts);
   const two = n => String(n).padStart(2, '0');
@@ -254,11 +261,8 @@ class Hub {
       sequence: ++this.notificationSequence };
   }
   notify(info, payload = this.notificationCard(info)) {
-    const { id, title, detail, agent, host, project, conversation, receivedTime } = payload;
-    if (!this.notifications.has(id)) {
-      this.notifications.set(id, { id, title: clip(title, 180) || 'AgentReminder', detail: clip(detail || payload.reason, 500),
-        agent: clip(agent, 40), host: clip(host, 120), project: clip(project, 120), conversation: clip(conversation, 180),
-        receivedTime: clip(receivedTime, 24), unread: true });
+    if (!this.notifications.has(payload.id)) {
+      this.notifications.set(payload.id, { ...inboxCard(payload), unread: true });
       if (this.notifications.size > 100) this.notifications.delete(this.notifications.keys().next().value);
     }
     const links = this.readyLinks();
@@ -443,6 +447,12 @@ function runDaemon() {
     const reply = (code, obj) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)); };
     try {
       if (req.headers.origin) return reply(403, { error: 'browser requests are not supported' });
+      if (req.url === '/inbox' || req.url === '/inbox/read') {
+        if (!/^(127\.0\.0\.1|localhost)(:\d+)?$/i.test(req.headers.host || '')) {
+          return reply(403, { error: 'inbox requires a loopback host' });
+        }
+        res.setHeader('Cache-Control', 'no-store');
+      }
       if (req.method === 'GET' && req.url === '/inbox') {
         const notifications = [...hub.notifications.values()].reverse();
         const approvals = new Map();
@@ -451,8 +461,7 @@ function runDaemon() {
         }
         for (const [id, payload] of mesh?.outgoing || []) approvals.set(id, payload);
         return reply(200, { notifications, unread: notifications.filter(note => note.unread).length,
-          approvals: [...approvals.values()].map(({ id, title, host, project, conversation, receivedTime }) =>
-            ({ id, title: clip(title, 180) || 'AgentReminder', host, project, conversation, receivedTime })),
+          approvals: [...approvals.values()].map(inboxCard),
           devices: new Set(hub.readyLinks().map(link => link.info.id)).size });
       }
       if (req.method === 'GET' && req.url === '/status') {

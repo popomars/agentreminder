@@ -71,6 +71,13 @@ test('real hook processes → daemon → TCP device → agent-compatible JSON', 
     assert.equal(received.filter(m => m.t === 'notify').at(-1).host, relayHost);
   }
 
+  const foreignHostStatus = await new Promise((resolve, reject) => {
+    http.get({ host: '127.0.0.1', port: httpPort, path: '/inbox', headers: { Host: 'example.test' } }, response => {
+      response.resume();
+      resolve(response.statusCode);
+    }).on('error', reject);
+  });
+  assert.equal(foreignHostStatus, 403);
   const notifications = await inbox();
   assert.equal(notifications.unread, 3);
   assert.equal(notifications.notifications[0].detail, '完成');
@@ -131,7 +138,9 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   send({ method: 'fixture/trigger', params: { requestId: 100 } });
   await until(() => desktop.some(m => m.id === 100) && received.slice(before).some(m => m.t === 'approval'));
   const card = received.slice(before).find(m => m.t === 'approval');
-  assert.equal((await inbox()).approvals[0].id, card.id);
+  const [visibleApproval] = (await inbox()).approvals;
+  assert.equal(visibleApproval.id, card.id);
+  assert.equal(visibleApproval.detail, '双端测试');
   send({ id: 100, result: { decision: 'decline' } });
   await until(() => received.some(m => m.t === 'cancel' && m.id === card.id));
   assert.equal((await inbox()).approvals.length, 0);
