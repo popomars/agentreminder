@@ -33,9 +33,10 @@ private struct Card: Decodable {
     let conversation: String?
     let receivedTime: String?
     let unread: Bool?
+    let kind: String?
 
     var summary: String {
-        [conversation, host, project, receivedTime].compactMap { $0 }
+        [host, project, conversation, receivedTime].compactMap { $0 }
             .filter { !$0.isEmpty }.joined(separator: " · ")
     }
 }
@@ -45,6 +46,7 @@ private struct Inbox: Decodable {
     let unread: Int
     let approvals: [Card]
     let devices: Int
+    let canClear: Bool?
 }
 
 private struct Pairing: Decodable {
@@ -121,7 +123,10 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         refreshing = true
         Task {
             defer { refreshing = false }
-            do { inbox = try await request("inbox") }
+            do {
+                inbox = try await request("inbox")
+                if inbox?.canClear != true { startService() }
+            }
             catch {
                 inbox = nil
                 startService()
@@ -164,16 +169,40 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return entry
     }
 
-    private func addCards(_ cards: [Card], title: String) {
+    private func oneLine(_ text: String, limit: Int) -> String {
+        let line = text.split(whereSeparator: \.isNewline).joined(separator: " ")
+        return line.count > limit ? String(line.prefix(limit - 1)) + "…" : line
+    }
+
+    private func cardTitle(_ card: Card, notification: Bool) -> String {
+        guard notification else { return card.title }
+        return card.kind == "done" ? label("任务完成", "Task completed") : card.title
+    }
+
+    private func clearAction(_ title: String, notifications: [Card], approvals: [Card] = []) -> NSMenuItem {
+        let entry = action(title, #selector(clearInbox(_:)),
+                           enabled: inbox?.canClear == true && (!notifications.isEmpty || !approvals.isEmpty))
+        entry.representedObject = ["notifications": notifications.map(\.id), "approvals": approvals.map(\.id)]
+        return entry
+    }
+
+    private func addCards(_ cards: [Card], title: String, notifications: Bool = false) {
         let entry = action(title, enabled: !cards.isEmpty)
         if !cards.isEmpty {
             let list = NSMenu(title: title)
             list.autoenablesItems = false
             for card in cards {
-                let caption = String(card.title.split(whereSeparator: \.isNewline).first ?? "").prefix(72)
+                let subject = oneLine(cardTitle(card, notification: notifications), limit: notifications ? 32 : 72)
+                let context = notifications ? [card.host, card.project, card.conversation].compactMap { $0 }
+                    .map { oneLine($0, limit: 24) }.filter { !$0.isEmpty } : []
+                let caption = (context + [subject]).joined(separator: " · ")
                 let row = action((card.unread == true ? "● " : "") + caption, #selector(showCard(_:)))
                 row.representedObject = card.id
                 list.addItem(row)
+            }
+            if notifications {
+                list.addItem(.separator())
+                list.addItem(clearAction(label("清除所有通知", "Clear all notifications"), notifications: cards))
             }
             entry.submenu = list
         }
@@ -194,9 +223,12 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
             item.button?.title = label("通知 \(inbox.unread) · 审批 \(inbox.approvals.count)",
                                        "\(inbox.unread) new · \(inbox.approvals.count) approvals")
             menu.addItem(action(label("已连接 \(inbox.devices) 台设备", "\(inbox.devices) connected devices"), enabled: false))
-            addCards(inbox.notifications, title: label("通知（\(inbox.unread) 未读）", "Notifications (\(inbox.unread) unread)"))
+            addCards(inbox.notifications, title: label("通知（\(inbox.unread) 未读）", "Notifications (\(inbox.unread) unread)"),
+                     notifications: true)
             addCards(inbox.approvals, title: label("待审批（\(inbox.approvals.count)）", "Pending approvals (\(inbox.approvals.count))"))
             menu.addItem(action(label("全部标为已读", "Mark all as read"), #selector(markAll), enabled: inbox.unread > 0))
+            menu.addItem(clearAction(label("清除所有审批和通知", "Clear all approvals and notifications"),
+                                     notifications: inbox.notifications, approvals: inbox.approvals))
         } else {
             item.button?.title = "AgentReminder"
             menu.addItem(action(label("正在连接服务", "Connecting to service"), enabled: false))
@@ -219,7 +251,7 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
               let card = (inbox.notifications + inbox.approvals).first(where: { $0.id == id }) else { return }
         if card.unread == true { markRead([id]) }
         let message = [card.summary, card.detail ?? ""].filter { !$0.isEmpty }.joined(separator: "\n\n")
-        showAlert(card.title, message)
+        showAlert(cardTitle(card, notification: card.unread != nil), message)
     }
 
     @objc private func markAll() { markRead(inbox?.notifications.filter { $0.unread == true }.map(\.id) ?? []) }
@@ -229,6 +261,20 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let body = try? JSONEncoder().encode(["ids": ids])
             let _: ReadResult? = try? await request("inbox/read", method: "POST", body: body)
             refresh()
+        }
+    }
+
+    @objc private func clearInbox(_ sender: NSMenuItem) {
+        guard let cards = sender.representedObject as? [String: [String]] else { return }
+        Task {
+            do {
+                let body = try JSONEncoder().encode(cards)
+                let _: ReadResult = try await request("inbox/clear", method: "POST", body: body)
+                refresh()
+            } catch {
+                showAlert(label("清除失败", "Could not clear the inbox"),
+                          label("请检查 AgentReminder 服务后重试。", "Check the AgentReminder service and try again."))
+            }
         }
     }
 

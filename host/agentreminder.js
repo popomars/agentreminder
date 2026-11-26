@@ -25,7 +25,7 @@ const { spawn, execFileSync } = require('child_process');
 const bluetooth = require('./bluetooth');
 const tailnet = require('./tailnet');
 
-const VERSION = '0.5.1';
+const VERSION = '0.5.2';
 const HOME_DIR = process.env.AGENTREMINDER_HOME || path.join(os.homedir(), '.agentreminder');
 const CONFIG_PATH = path.join(HOME_DIR, 'config.json');
 const LOG_PATH = path.join(HOME_DIR, 'daemon.log');
@@ -76,11 +76,11 @@ function log(...args) {
 
 const clip = (s, n) => { s = String(s ?? ''); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
 function inboxCard(payload) {
-  const { id, title, detail, reason, host, project, conversation, receivedTime } = payload;
+  const { id, title, detail, reason, host, project, conversation, receivedTime, kind } = payload;
   return { id, title: clip(title, 180) || 'AgentReminder',
     detail: clip(payload.t === 'approval' ? reason || detail : detail || reason, 500),
     host: clip(host, 120), project: clip(project, 120), conversation: clip(conversation, 180),
-    receivedTime: clip(receivedTime, 24) };
+    receivedTime: clip(receivedTime, 24), kind: clip(kind, 24) };
 }
 function cardTime(ts) {
   const date = new Date(ts);
@@ -447,7 +447,7 @@ function runDaemon() {
     const reply = (code, obj) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)); };
     try {
       if (req.headers.origin) return reply(403, { error: 'browser requests are not supported' });
-      if (req.url === '/inbox' || req.url === '/inbox/read') {
+      if (req.url === '/inbox' || req.url === '/inbox/read' || req.url === '/inbox/clear') {
         if (!/^(127\.0\.0\.1|localhost)(:\d+)?$/i.test(req.headers.host || '')) {
           return reply(403, { error: 'inbox requires a loopback host' });
         }
@@ -459,8 +459,8 @@ function runDaemon() {
         for (const { payload, target } of hub.pending.values()) {
           if (!target) approvals.set(payload.id, payload);
         }
-        for (const [id, payload] of mesh?.outgoing || []) approvals.set(id, payload);
-        return reply(200, { notifications, unread: notifications.filter(note => note.unread).length,
+        for (const [id, { card }] of mesh?.outgoing || []) approvals.set(id, card);
+        return reply(200, { canClear: true, notifications, unread: notifications.filter(note => note.unread).length,
           approvals: [...approvals.values()].map(inboxCard),
           devices: new Set(hub.readyLinks().map(link => link.info.id)).size });
       }
@@ -473,7 +473,7 @@ function runDaemon() {
           devices: hub.readyLinks().map(l => ({ kind: l.kind, name: l.name, info: l.info })),
           pending: [...new Map([
             ...[...hub.pending].map(([id, pending]) => [id, pending.payload]),
-            ...(mesh?.outgoing || []),
+            ...[...(mesh?.outgoing || [])].map(([id, { card }]) => [id, card]),
           ]).values()].map(({ id, agent, title }) => ({ id, agent, title })),
           ...(mesh ? { tailnet: mesh.status() } : meshConfigError ? { tailnet: { listening: false, error: meshConfigError } } : {}),
         });
@@ -484,6 +484,18 @@ function runDaemon() {
         for (const id of Array.isArray(body?.ids) ? body.ids : []) {
           const notification = hub.notifications.get(id);
           if (notification) notification.unread = false;
+        }
+        return reply(200, { ok: true });
+      }
+      if (req.url === '/inbox/clear') {
+        for (const id of Array.isArray(body?.notifications) ? body.notifications : []) hub.notifications.delete(id);
+        for (const id of Array.isArray(body?.approvals) ? body.approvals : []) {
+          const outgoing = mesh?.outgoing.get(id);
+          if (outgoing) outgoing.handoff();
+          else {
+            const pending = hub.pending.get(id);
+            if (pending && !pending.target) hub.resolve(id, 'skip', 'menu-bar');
+          }
         }
         return reply(200, { ok: true });
       }

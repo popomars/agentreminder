@@ -154,5 +154,34 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   await until(() => desktop.some(m => m.method === 'serverRequest/resolved' && m.params.requestId === 102));
   assert.deepEqual(received.filter(m => m.t === 'approval').at(-1).choices, ['预览', '正式']);
   assert(desktop.some(m => m.method === 'fixture/received' && m.params.answers?.environment?.answers[0] === '正式'));
+  const sendInbox = (route, data) => fetch(`http://127.0.0.1:${httpPort}${route}`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(data),
+  }).then(r => r.json());
+  const clearInbox = (notifications, approvals = []) => sendInbox('/inbox/clear', { notifications, approvals });
+  decision = null;
+  const waiting = sendInbox('/approval', { info: { title: '清除测试' } });
+  await until(() => received.some(message => message.t === 'approval' && message.title === '清除测试'));
+  const snapshot = await inbox();
+  assert.equal(snapshot.canClear, true);
+  const completion = snapshot.notifications.find(note => note.kind === 'done');
+  assert(completion);
+  assert.equal(completion.host, relayHost);
+  assert.equal(completion.project, '项目');
+  const approvalToClear = snapshot.approvals.find(approval => approval.title === '清除测试');
+  assert(approvalToClear);
+
+  await sendInbox('/notify', { info: { title: '稍后到达', kind: 'done', conversation: '新对话' } });
+  assert.deepEqual(await clearInbox(snapshot.notifications.map(note => note.id)), { ok: true });
+  const remaining = await inbox();
+  assert.deepEqual(remaining.notifications.map(note => note.conversation), ['新对话']);
+  assert(remaining.approvals.some(approval => approval.id === approvalToClear.id));
+  assert.deepEqual(await clearInbox(remaining.notifications.map(note => note.id), [approvalToClear.id]), { ok: true });
+  assert.deepEqual(await waiting, { decision: null, reason: 'menu-bar' });
+  await until(() => received.some(message => message.t === 'resolved' &&
+    message.id === approvalToClear.id && message.decision === 'skip'));
+  const cleared = await inbox();
+  assert.equal(cleared.unread, 0);
+  assert.equal(cleared.approvals.length, 0);
+
   proxy.stdin.end();
 });

@@ -99,9 +99,16 @@ test('three identical meshes share cards, accept one decision, and clear mirrors
   assert.equal((await cancel).decision, null);
   await until(() => c.last('cancel')?.id === third.id);
 
+  const menuHandoff = meshes[0].approval(info, 3000, new EventEmitter());
+  await until(() => c.last('approval').id !== third.id);
+  const handedOff = c.last('approval').id;
+  meshes[0].outgoing.get(handedOff).handoff();
+  assert.deepEqual(await menuHandoff, { decision: null, reason: 'menu-bar' });
+  await until(() => [b, c].every(device => device.last('cancel')?.id === handedOff));
+
   await meshes[2].close();
   const remoteOnly = meshes[0].approval(info, 3000, new EventEmitter());
-  await until(() => b.last('approval').id !== third.id);
+  await until(() => b.last('approval').id !== handedOff);
   b.decide('allow');
   assert.equal((await remoteOnly).decision, 'allow');
   assert.equal(await meshes[0].notify({ ...info, kind:'done' }), 1);
