@@ -37,17 +37,24 @@ To move a board to a new Mac, connect it by USB and pair from the bell on the ne
 
 ### 3. Connect your agent
 
-The installer sets up hooks for detected Codex, Claude Code, dsh, and WorkBuddy installations and preserves other hooks. After installing another agent, enable a supported integration from **Agent integrations** or rerun setup, for example with `bash install.sh --agent workbuddy`.
+The installer detects Codex CLI, Claude Code CLI, dsh, and WorkBuddy and merges the required hooks. The default files are `~/.codex/hooks.json` and `~/.claude/settings.json`. If `CODEX_HOME` or `CLAUDE_CONFIG_DIR` is set during installation, the menu bar service uses that directory too. If you install a CLI later, rerun the installer or enable it under **Agent integrations**.
 
 | Agent | After installation |
 | --- | --- |
-| Codex CLI | Reopen Codex and use `/hooks` to review and trust the AgentReminder hooks. |
+| Codex CLI | Open a new session. Run `/hooks` and review and trust the AgentReminder `PermissionRequest` and `Stop` hooks. The bell shows **Hooks configured** once setup has written them. |
 | Codex Desktop | Choose **Agent integrations → Codex Desktop approvals → Enable** from the bell, then choose **Restart Now** or **Reopen Later**. Use manual approval and set the reviewer to the user. |
-| Claude Code | Open a new session. AgentReminder supports `AskUserQuestion` and, on version 2.1.76 or later, `Elicitation`. |
+| Claude Code CLI | Start a new `claude` session. AgentReminder supports `AskUserQuestion` and, on version 2.1.76 or later, `Elicitation`. |
 | dsh | Install the Claude Code hooks bridge in your profile, merge the Cordis example, and set `configPath` to the absolute path of `~/.agentreminder/dsh-hooks.json`. [Cordis configuration](integrations/dsh/cordis.patch.yml) |
 | WorkBuddy (macOS) | Reopen WorkBuddy. Task completions are forwarded automatically. When a command triggers WorkBuddy's local security approval, the device prompts you to return to WorkBuddy to confirm. Approval reminders appear under **Notifications**. |
 
-After a real task finishes, open the bell to view the notification. Respond to approvals in the originating agent or on the device. Codex Desktop mirrors native command and file approvals, and the first response wins. If the board disconnects, times out, or hands a request back, continue in the originating conversation.
+### 4. Handle approvals in the CLI
+
+1. Pair a device and send a test notification from the bell. To send a sample approval card, run `node ~/.agentreminder/app/host/agentreminder.js test`.
+2. Start a new session in your project. To test with Codex CLI, run `codex --sandbox read-only --ask-for-approval on-request` and complete the trust review in `/hooks`. For Claude Code, run `claude --permission-mode default`. Ask the agent to perform a harmless operation that requires permission, such as creating a temporary test file. Operations already allowed by the active policy run directly.
+3. Follow the board labels to approve or deny. If you choose **Continue on computer**, the board disconnects, or the wait expires, handle the prompt in the original terminal. The CLI waits for the approval hook before showing its own prompt. Simultaneous prompts are available through Codex Desktop approvals.
+4. After the task finishes, look for its completion in the bell's **Notifications**. If Codex cannot start or has no `/hooks` command, check `codex --version` and install a version that supports hooks.
+
+[Codex hooks documentation](https://learn.chatgpt.com/docs/hooks) · [Claude Code hooks documentation](https://code.claude.com/docs/en/hooks)
 
 ## Use the bell menu
 
@@ -59,9 +66,9 @@ After a real task finishes, open the bell to view the notification. Respond to a
 | **Install or update firmware…** | Installs the bundled firmware for the selected model. Keep USB connected while writing. Paired boards reconnect after restarting. |
 | **Send test notification** | Checks delivery to the menu and local devices. |
 | **Tailnet service** | **Initialize** creates and copies a new group key. **Join Tailnet service** uses an existing group key. **View shared key** displays or copies the saved key. |
-| **Agent integrations** | Shows the status of Codex Desktop approvals, Claude Code, dsh, and WorkBuddy. Each integration can be enabled or disabled independently. Codex changes apply after reopening ChatGPT. |
+| **Agent integrations** | Shows the status of Codex CLI, Codex Desktop approvals, Claude Code CLI, dsh, and WorkBuddy. Each integration can be enabled or disabled independently. Codex Desktop changes apply after reopening ChatGPT. |
 | **Launch at login** | Appears as AgentReminder in macOS Login Items & Extensions. It starts the bell and local service, and restores the Codex Dock configuration when enabled. |
-| **Check for updates…** | Checks the version and commit on GitHub `main` and opens the current installation guide. |
+| **Check for updates…** | Checks GitHub `main` for a newer version. Choose **Install update** to install it and reopen the bell while retaining pairings, Tailnet settings, and hooks. |
 
 The board shows one approval at a time with a five-minute default deadline. For a question with two preset answers, use the indicated buttons. Return to the original conversation for extra choices, text input, or authentication. Press **PWR** briefly on Waveshare or the bottom function button on Passport in portrait orientation to hand a question back.
 

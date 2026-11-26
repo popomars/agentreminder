@@ -1,5 +1,9 @@
 # Current Sprint
 
+- Install app updates directly from the menu bar using the GitHub revision shown by the update check.
+
+- Distinguish Codex CLI hooks from desktop approval mirroring in the menu.
+  Detect native CLI installs and remember custom Codex and Claude settings directories.
 - Ship a host and firmware installer that uses the same Git commit for both.
 - Verify the five-minute approval deadline, physical device queue and source metadata.
 - Keep one local daemon. Use a CoreBluetooth helper only for a paired macOS device and the Codex bridge only for the desktop session.

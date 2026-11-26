@@ -10,6 +10,11 @@ private struct Installation: Decodable {
 
     var stateDirectory: URL { URL(fileURLWithPath: statePath, isDirectory: true) }
 
+    var usesDefaultStateDirectory: Bool {
+        let standard = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".agentreminder")
+        return stateDirectory.resolvingSymlinksInPath().path == standard.resolvingSymlinksInPath().path
+    }
+
     var loginItemMarker: URL { stateDirectory.appendingPathComponent("login-item-registered") }
     var configFile: URL { stateDirectory.appendingPathComponent("config.json") }
     var host: URL { stateDirectory.appendingPathComponent("app/host/agentreminder.js") }
@@ -31,7 +36,8 @@ private struct Installation: Decodable {
         let nodeDirectory = URL(fileURLWithPath: node).deletingLastPathComponent().path
         environment["AGENTREMINDER_HOME"] = stateDirectory.path
         if let python { environment["AGENTREMINDER_BOOTSTRAP_PYTHON"] = python }
-        environment["PATH"] = [nodeDirectory, environment["PATH"] ?? "", "/opt/homebrew/bin", "/usr/local/bin",
+        let localBin = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".local/bin").path
+        environment["PATH"] = [nodeDirectory, environment["PATH"] ?? "", localBin, "/opt/homebrew/bin", "/usr/local/bin",
                                "/usr/bin", "/bin", "/usr/sbin", "/sbin"].joined(separator: ":")
         return environment
     }
@@ -105,7 +111,7 @@ private struct TailnetSetupResult: Decodable { let ok: Bool?; let error: String?
 private struct CodexDockStatus: Decodable { let dockOverrideActive: Bool }
 private struct AgentIntegrationResult: Decodable { let status: String; let installedHooks: Bool? }
 private enum AgentIntegration: String, CaseIterable {
-    case codex, claude, dsh, workbuddy
+    case codex, codexDesktop, claude, dsh, workbuddy
 
     struct Action {
         let agent: AgentIntegration
@@ -113,7 +119,7 @@ private enum AgentIntegration: String, CaseIterable {
     }
 }
 
-private enum IntegrationStatus: String { case enabled, disabled, unconfigured, unavailable }
+private enum IntegrationStatus: String { case enabled, disabled, unconfigured, unavailable, notInstalled }
 private enum TailnetSetupMode: String { case create, join }
 
 private final class TailnetKeyField: NSSecureTextField {
@@ -168,6 +174,7 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var timer: Timer?
     private var refreshing = false
     private var starting: Process?
+    private var serviceNeedsStartup = true
     private var lastStart = Date.distantPast
     private var pairing = false
     private var setupUsb = ProcessInfo.processInfo.arguments.contains("--setup-usb")
@@ -178,6 +185,7 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var configuringTailnet = false
     private var updatingHookAgents: Set<AgentIntegration> = []
     private var checkingUpdates = false
+    private var installingUpdate = false
     private var initTailnetOnLaunch = ProcessInfo.processInfo.arguments.contains("--init-tailnet")
     private var trackingMenu = false
     private var firmwareUpdate: FirmwareUpdate?
@@ -241,8 +249,7 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         redraw()
         Task {
-            let defaultState = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".agentreminder")
-            if installation.stateDirectory.resolvingSymlinksInPath().path == defaultState.resolvingSymlinksInPath().path {
+            if installation.usesDefaultStateDirectory {
                 do {
                     let result = try await runCodexSetup("restore")
                     if result.exitCode != 0 {
@@ -297,7 +304,9 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
             defer { refreshing = false }
             do {
                 inbox = try await request("inbox")
-                if inbox?.canManageIntegrations == nil || inbox?.canInitializeTailnet == nil { startService() }
+                if serviceNeedsStartup || inbox?.canManageIntegrations == nil || inbox?.canInitializeTailnet == nil {
+                    startService()
+                }
                 if initTailnetOnLaunch && inbox?.canInitializeTailnet == true {
                     initTailnetOnLaunch = false
                     Task {
@@ -315,7 +324,8 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func startService(force: Bool = false) {
-        guard firmwareUpdate == nil, starting == nil, force || Date().timeIntervalSince(lastStart) >= 10 else { return }
+        guard !installingUpdate, firmwareUpdate == nil, starting == nil,
+              force || Date().timeIntervalSince(lastStart) >= 10 else { return }
         let process = Process()
         let executable = URL(fileURLWithPath: installation.node)
         process.executableURL = executable
@@ -326,7 +336,10 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         process.terminationHandler = { [weak self] completed in
             let succeeded = completed.terminationStatus == 0
             Task { @MainActor in
-                if succeeded { self?.setupUsb = false }
+                if succeeded {
+                    self?.setupUsb = false
+                    self?.serviceNeedsStartup = false
+                }
                 self?.starting = nil
                 self?.refresh()
             }
@@ -404,6 +417,10 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         guard !trackingMenu else { return }
         menu.removeAllItems()
         codexMenuItem = nil
+        if installingUpdate {
+            menu.addItem(action(label("正在安装 AgentReminder 更新…", "Installing AgentReminder update…"), enabled: false))
+            return
+        }
         if let inbox {
             item.button?.title = label("通知 \(inbox.unread) · 审批 \(inbox.approvals.count)",
                                        "\(inbox.unread) new · \(inbox.approvals.count) approvals")
@@ -525,11 +542,16 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 alert.messageText = sameVersionDifferentCommit
                     ? label("GitHub main 有不同提交", "GitHub main has a different revision")
                     : label("发现 AgentReminder \(remoteVersion)", "AgentReminder \(remoteVersion) is available")
-                alert.informativeText = label("可从 GitHub 查看新版安装说明。", "See GitHub for the latest installation instructions.")
+                alert.informativeText = label("安装后铃铛会自动重开。现有配对、联机设置和 hooks 会保留。",
+                                              "The bell reopens automatically after installation. Pairings, Tailnet settings, and hooks are kept.")
                 alert.addButton(withTitle: label("稍后", "Later"))
+                alert.addButton(withTitle: label("安装更新", "Install update"))
                 alert.addButton(withTitle: label("查看安装说明", "View installation instructions"))
                 NSApp.activate(ignoringOtherApps: true)
-                if alert.runModal() == .alertSecondButtonReturn,
+                let response = alert.runModal()
+                if response == .alertSecondButtonReturn {
+                    await installUpdate(revision: revision)
+                } else if response == .alertThirdButtonReturn,
                    let url = URL(string: "https://github.com/popomars/agentreminder/tree/\(revision)") {
                     NSWorkspace.shared.open(url)
                 }
@@ -537,6 +559,77 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 showAlert(label("无法检查更新", "Could not check for updates"),
                           label("无法读取 GitHub 版本，请稍后重试。", "Could not read the GitHub version. Try again later."))
             }
+        }
+    }
+
+    private func installUpdate(revision: String) async {
+        guard !installingUpdate else { return }
+        guard firmwareUpdate == nil, !pairing, !configuringCodex, !configuringTailnet,
+              updatingHookAgents.isEmpty, inbox?.approvals.isEmpty != false else {
+            showAlert(label("暂时无法安装更新", "Update is temporarily unavailable"),
+                      label("请先完成当前操作和待审批事项，再重试。", "Finish active operations and pending approvals, then try again."))
+            return
+        }
+        installingUpdate = true
+        redraw()
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agentreminder-app-update-" + UUID().uuidString, isDirectory: true)
+        defer {
+            try? FileManager.default.removeItem(at: directory)
+            installingUpdate = false
+            redraw()
+        }
+        do {
+            let data = try await fetchUpdateMetadata("contents/install.sh?ref=\(revision)", accept: "application/vnd.github.raw+json")
+            guard data.starts(with: Data("#!/usr/bin/env bash\n".utf8)) else {
+                throw URLError(.cannotDecodeContentData)
+            }
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
+                                                    attributes: [.posixPermissions: 0o700])
+            let script = directory.appendingPathComponent("install.sh")
+            let log = directory.appendingPathComponent("install.log")
+            try data.write(to: script)
+            try Data().write(to: log)
+            let result = try await runAppInstaller(script: script, log: log, revision: revision)
+            if result != 0 {
+                let file = try FileHandle(forReadingFrom: log)
+                defer { try? file.close() }
+                let end = try file.seekToEnd()
+                try file.seek(toOffset: end > 4096 ? end - 4096 : 0)
+                let details = String(decoding: try file.read(upToCount: 4096) ?? Data(), as: UTF8.self)
+                    .split(whereSeparator: \.isNewline).suffix(8).joined(separator: "\n")
+                showAlert(label("安装更新失败", "Could not install the update"),
+                          details.isEmpty ? label("安装器已退出，请稍后重试。", "The installer exited. Try again later.") : details)
+            }
+        } catch {
+            showAlert(label("安装更新失败", "Could not install the update"), error.localizedDescription)
+        }
+    }
+
+    private func runAppInstaller(script: URL, log: URL, revision: String) async throws -> Int32 {
+        let output = try FileHandle(forWritingTo: log)
+        defer { try? output.close() }
+        var environment = installation.processEnvironment
+        if installation.usesDefaultStateDirectory { environment.removeValue(forKey: "AGENTREMINDER_HOME") }
+        return try await withCheckedThrowingContinuation { continuation in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/bin/bash")
+            // The new app can replace this process's parent before Swift gets a completion callback.
+            process.arguments = ["-c", """
+                script=$1
+                shift
+                /bin/bash "$script" "$@"
+                result=$?
+                if [ "$result" -eq 0 ]; then rm -rf -- "${script%/*}"; fi
+                exit "$result"
+                """, "agentreminder-update", script.path, "--ref", revision,
+                "--skip-hooks", "--no-pair", "--no-autostart", "--lang", installation.language]
+            process.environment = environment
+            process.standardOutput = output
+            process.standardError = output
+            process.terminationHandler = { completed in continuation.resume(returning: completed.terminationStatus) }
+            do { try process.run() }
+            catch { continuation.resume(throwing: error) }
         }
     }
 
@@ -668,7 +761,8 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func integrationTitle(_ agent: AgentIntegration) -> String {
         switch agent {
-        case .codex: return label("Codex 双端审批", "Codex Desktop approvals")
+        case .codex: return "Codex CLI"
+        case .codexDesktop: return label("Codex 双端审批（桌面端）", "Codex Desktop approvals")
         case .claude: return "Claude Code"
         case .dsh: return "dsh"
         case .workbuddy: return "WorkBuddy"
@@ -681,6 +775,7 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         case .disabled: return label("已停用", "Disabled")
         case .unconfigured: return label("待配置", "Not configured")
         case .unavailable: return label("状态不可用", "Status unavailable")
+        case .notInstalled: return label("未安装受支持的桌面端", "Supported app not installed")
         }
     }
 
@@ -701,8 +796,10 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let hint: String?
             switch agent {
             case .codex:
+                hint = label("在终端运行 /hooks 审核并信任 AgentReminder", "Review and trust AgentReminder under /hooks in Codex")
+            case .codexDesktop:
                 hint = installation.codexApp == nil
-                    ? label("需要支持的 ChatGPT 桌面端", "Requires a supported ChatGPT Desktop installation")
+                    ? nil
                     : label("更改后需要重新打开 ChatGPT", "Reopen ChatGPT after changing this setting")
             case .claude: hint = nil
             case .dsh: hint = label("需在 dsh profile 中加载 hooks 桥接", "Requires the hooks bridge in the dsh profile")
@@ -715,7 +812,7 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
             row.submenu = options
             updateAgentMenuItem(row, agent: agent)
             agents.addItem(row)
-            if agent == .codex { codexMenuItem = row }
+            if agent == .codexDesktop { codexMenuItem = row }
         }
         entry.submenu = agents
         menu.addItem(entry)
@@ -724,14 +821,17 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func updateAgentMenuItem(_ row: NSMenuItem, agent: AgentIntegration) {
         let state: IntegrationStatus
         let ready: Bool
-        if agent == .codex {
-            state = codexDockStatus.map { $0.dockOverrideActive ? .enabled : .disabled } ?? .unavailable
+        if agent == .codexDesktop {
+            state = installation.codexApp == nil
+                ? .notInstalled : codexDockStatus.map { $0.dockOverrideActive ? .enabled : .disabled } ?? .unavailable
             ready = installation.codexApp != nil && !configuringCodex
         } else {
             state = inbox?.agentIntegrations?[agent.rawValue].flatMap(IntegrationStatus.init(rawValue:)) ?? .unavailable
             ready = inbox?.canManageIntegrations == true && !updatingHookAgents.contains(agent)
         }
-        row.title = "\(integrationTitle(agent)) · \(integrationStatusLabel(state))"
+        let status = agent == .codex && state == .enabled
+            ? label("Hooks 已配置", "Hooks configured") : integrationStatusLabel(state)
+        row.title = "\(integrationTitle(agent)) · \(status)"
         for option in row.submenu?.items ?? [] {
             guard let action = option.representedObject as? AgentIntegration.Action else { continue }
             option.state = state == (action.enabled ? .enabled : .disabled) ? .on : .off
@@ -741,7 +841,7 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func toggleAgent(_ sender: NSMenuItem) {
         guard let action = sender.representedObject as? AgentIntegration.Action else { return }
-        if action.agent == .codex { configureCodex(enabled: action.enabled) }
+        if action.agent == .codexDesktop { configureCodex(enabled: action.enabled) }
         else { toggleHookAgent(action) }
     }
 
@@ -762,6 +862,9 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 if action.enabled && (result.installedHooks ?? firstSetup) {
                     let detail: String
                     switch agent {
+                    case .codex:
+                        detail = label("请重开 Codex，在终端输入 /hooks，审核并信任 AgentReminder 的 PermissionRequest 和 Stop。",
+                                       "Reopen Codex, then review and trust the AgentReminder PermissionRequest and Stop hooks in /hooks.")
                     case .claude:
                         detail = label("Hooks 已写入。请开启新的 Claude Code 会话。", "Hooks are installed. Start a new Claude Code session.")
                     case .dsh:
@@ -770,9 +873,10 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     case .workbuddy:
                         detail = label("请重开 WorkBuddy。设备会收到任务完成通知和命令待确认提醒。",
                                        "Reopen WorkBuddy to receive task completions and command approval reminders on your device.")
-                    case .codex: return
+                    case .codexDesktop: return
                     }
-                    showAlert("\(name) · \(integrationStatusLabel(.enabled))", detail)
+                    let status = agent == .codex ? label("Hooks 已配置", "Hooks configured") : integrationStatusLabel(.enabled)
+                    showAlert("\(name) · \(status)", detail)
                 }
             } catch {
                 showAlert(label("无法更新 \(name) 接入", "Could not update \(name)"),
@@ -783,7 +887,7 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func updateCodexMenuState() {
-        if let codexMenuItem { updateAgentMenuItem(codexMenuItem, agent: .codex) }
+        if let codexMenuItem { updateAgentMenuItem(codexMenuItem, agent: .codexDesktop) }
     }
 
     private func runCodexSetup(_ command: String, app: URL? = nil) async throws -> (exitCode: Int32, output: Data) {
@@ -846,7 +950,7 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }
 
                 let restart = NSAlert()
-                restart.messageText = "\(integrationTitle(.codex)) · \(integrationStatusLabel(enabled ? .enabled : .disabled))"
+                restart.messageText = "\(integrationTitle(.codexDesktop)) · \(integrationStatusLabel(enabled ? .enabled : .disabled))"
                 restart.informativeText = label("重新打开 ChatGPT 后生效。可以稍后从 Dock 重开，或现在重启。退出可能中断正在运行的任务。",
                                                 "The setting takes effect when ChatGPT reopens. Reopen it later from the Dock, or restart now. Quitting may interrupt running tasks.")
                 restart.addButton(withTitle: label("稍后重开", "Reopen Later"))

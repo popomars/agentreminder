@@ -76,11 +76,13 @@ if ! "$flash" && [[ -n "$board$flash_port$flash_baud" ]]; then
   exit 2
 fi
 
+# Native Claude Code installs here even before a shell has added it to PATH.
+export PATH="$PATH:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin"
 if "$install_hooks" && (( ${#agents[@]} == 0 )); then
   if command -v codex >/dev/null || [[ -d ${CODEX_HOME:-"$HOME/.codex"} ||
     -x "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex" ||
     -x "$HOME/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex" ]]; then agents+=(codex); fi
-  if command -v claude >/dev/null || [[ -d "$HOME/.claude" ]]; then agents+=(claude); fi
+  if command -v claude >/dev/null || [[ -d ${CLAUDE_CONFIG_DIR:-"$HOME/.claude"} ]]; then agents+=(claude); fi
   if command -v dsh >/dev/null; then agents+=(dsh); fi
   if [[ -d "$HOME/.workbuddy" || -d /Applications/WorkBuddy.app || -d "$HOME/Applications/WorkBuddy.app" ]]; then
     auto_workbuddy=true
@@ -302,15 +304,22 @@ if "$menu_bar"; then
     fi
     exit 1
   fi
-  rm -rf "$menu_stage/previous.app"
   launch_args=(--replace-existing)
   if "$autostart" && [[ -z ${AGENTREMINDER_HOME:-} ]]; then launch_args+=(--register-login); fi
   if "$pair"; then launch_args+=(--setup-usb); fi
   if "$init_tailnet"; then launch_args+=(--init-tailnet); fi
   if open -n "$menu_path" --args "${launch_args[@]}"; then
+    rm -rf "$menu_stage/previous.app"
     say '请从菜单栏的 AgentReminder 铃铛开始配对或发送测试通知。' 'Open the AgentReminder bell in the menu bar to pair a device or send a test notification.'
     say "应用程序：$menu_path" "Application: $menu_path"
   else
+    if [[ -e "$menu_stage/previous.app" || -L "$menu_stage/previous.app" ]]; then
+      mv "$menu_path" "$menu_stage/failed.app"
+      mv "$menu_stage/previous.app" "$menu_path"
+      say '未能启动新版菜单栏应用，已恢复原应用。' \
+          'The updated menu bar app could not start. The previous app was restored.' >&2
+      exit 1
+    fi
     say "未能自动启动菜单栏应用。登录 macOS 桌面后打开 $menu_path。" \
         "The menu bar app could not open automatically. After signing in to macOS, open $menu_path." >&2
     exit 1
@@ -329,8 +338,15 @@ if "$install_hooks"; then
       say "dsh 需安装 Claude Code hooks 桥接，并将示例合并到所用 profile：$install_dir/integrations/dsh/cordis.patch.yml" \
           "For dsh, install the Claude Code hooks bridge and merge this example into your profile: $install_dir/integrations/dsh/cordis.patch.yml"
     elif [[ "$agent" == codex ]]; then
-      say '重开 Codex，并用 /hooks 审核及信任 AgentReminder 的 hooks。' \
-          'Reopen Codex and use /hooks to review and trust AgentReminder hooks.'
+      if ! codex --version >/dev/null 2>&1; then
+        say '已写入 Codex hooks，但终端中的 codex 无法启动。请确认 codex --version 可运行。' \
+            'Codex hooks are installed, but the terminal command could not start. Check that codex --version works.' >&2
+      fi
+      say '在 Codex CLI 重新打开会话，输入 /hooks，审核并信任 AgentReminder 的 PermissionRequest 和 Stop。' \
+          'Open a new Codex CLI session. In /hooks, review and trust the AgentReminder PermissionRequest and Stop hooks.'
+    elif [[ "$agent" == claude ]]; then
+      say 'Claude Code hooks 已配置。重新打开 Claude Code 会话即可使用。' \
+          'Claude Code hooks are installed. Open a new Claude Code session to use them.'
     elif [[ "$agent" == workbuddy ]]; then
       say '请重开 WorkBuddy，以加载任务完成通知。命令审批仍在 WorkBuddy 确认。' \
           'Reopen WorkBuddy to load completion notifications. Confirm command approvals in WorkBuddy.'

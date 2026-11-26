@@ -26,12 +26,13 @@ const bluetooth = require('./bluetooth');
 const tailnet = require('./tailnet');
 const workbuddy = require('./workbuddy');
 
-const VERSION = '0.5.8';
+const VERSION = '0.5.10';
 const UNKNOWN_CONVERSATION = '未命名对话';
 const HOME_DIR = process.env.AGENTREMINDER_HOME || path.join(os.homedir(), '.agentreminder');
 const CONFIG_PATH = path.join(HOME_DIR, 'config.json');
 const LOG_PATH = path.join(HOME_DIR, 'daemon.log');
-const INTEGRATION_AGENTS = ['claude', 'dsh', 'workbuddy'];
+const INTEGRATION_AGENTS = ['codex', 'claude', 'dsh', 'workbuddy'];
+const AGENT_CONFIG_ENV = { codex: 'CODEX_HOME', claude: 'CLAUDE_CONFIG_DIR' };
 const WORKBUDDY_DIR = path.join(os.homedir(), '.workbuddy');
 const INBOX_HANDOFF_PATH = path.join(HOME_DIR, 'inbox-upgrade.json');
 
@@ -638,7 +639,10 @@ function runDaemon() {
         const seconds = Number(body.timeoutSec || cfg.approvalTimeoutSec);
         const timeoutMs = Math.round(Math.max(5, Math.min(Number.isFinite(seconds) ? seconds : 300, 3600)) * 1000);
         const info = { ...body.info, interaction: req.url === '/interaction' };
-        if (!integrationAllowed(cfg, info.agent)) return reply(200, { decision: null, reason: 'agent-disabled' });
+        // The Codex CLI switch is checked by its hook. Desktop proxy requests share the same agent name.
+        if (info.agent !== 'codex' && !integrationAllowed(cfg, info.agent)) {
+          return reply(200, { decision: null, reason: 'agent-disabled' });
+        }
         if (mesh) return reply(200, await mesh.approval(info, timeoutMs, res));
         const { id, promise } = hub.requestApproval(info, timeoutMs);
         // If the hook process dies (agent cancelled / user hit Esc), clear the card on the device.
@@ -647,7 +651,7 @@ function runDaemon() {
       }
       if (req.url === '/notify') {
         const info = body.info || {};
-        if (!integrationAllowed(cfg, info.agent)) return reply(200, { delivered: 0 });
+        if (info.agent !== 'codex' && !integrationAllowed(cfg, info.agent)) return reply(200, { delivered: 0 });
         return reply(200, { delivered: await notify(info) });
       }
       if (req.url === '/raw') {
@@ -975,13 +979,14 @@ async function runHook(argv) {
   const agent = arg(argv, 'agent', 'agent');
   const event = arg(argv, 'event', 'permission');     // permission | pretool | stop | notification
   if (agent === 'workbuddy' && event !== 'stop') return;
-  if (agent === 'codex' && event === 'permission' && process.env.AGENTREMINDER_CODEX_DUAL_APPROVAL === '1') {
+  const desktopCodex = agent === 'codex' && process.env.AGENTREMINDER_CODEX_DUAL_APPROVAL === '1';
+  if (desktopCodex && event === 'permission') {
     // The app-server proxy mirrors the native request after Codex creates it.
     return;
   }
   const input = await readStdin();
   const cfg = loadConfig();
-  if (!integrationAllowed(cfg, agent)) return;
+  if (!desktopCodex && !integrationAllowed(cfg, agent)) return;
   const session = describeSession(input, agent, process.cwd());
   const out = (obj) => { if (obj) process.stdout.write(JSON.stringify(obj)); };
 
@@ -1078,9 +1083,14 @@ function mergeHooks(file, hooks, agent) {
 function shellQuote(s) { return "'" + s.replace(/'/g, "'\\''") + "'"; }
 function hookCmd(agent, event) { return `${shellQuote(process.execPath)} ${shellQuote(__filename)} hook --agent ${agent} --event ${event}`; }
 
+function agentConfigDirectory(agent) {
+  return path.resolve(process.env[AGENT_CONFIG_ENV[agent]] ||
+    loadConfig().agentConfigDirs?.[agent] || path.join(os.homedir(), '.' + agent));
+}
+
 const hookSettings = {
-  codex: path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'hooks.json'),
-  claude: path.join(os.homedir(), '.claude', 'settings.json'),
+  get codex() { return path.join(agentConfigDirectory('codex'), 'hooks.json'); },
+  get claude() { return path.join(agentConfigDirectory('claude'), 'settings.json'); },
   dsh: path.join(HOME_DIR, 'dsh-hooks.json'),
   workbuddy: path.join(WORKBUDDY_DIR, 'settings.json'),
 };
@@ -1096,7 +1106,7 @@ function integrationHasHooks(agent) {
   let file;
   try { file = JSON.parse(fs.readFileSync(hookSettings[agent], 'utf8')); }
   catch (error) { if (error.code === 'ENOENT') return false; throw error; }
-  const requiredEvents = agent === 'workbuddy' ? ['Stop'] : ['Stop', agent === 'claude' ? 'PermissionRequest' : 'PreToolUse'];
+  const requiredEvents = agent === 'workbuddy' ? ['Stop'] : ['Stop', agent === 'dsh' ? 'PreToolUse' : 'PermissionRequest'];
   return requiredEvents.every(event => {
     const groups = file?.hooks?.[event];
     return Array.isArray(groups) && groups.some(group =>
@@ -1205,7 +1215,20 @@ async function main() {
       console.log(r.delivered ? '已发送 Wi-Fi 配置，设备会自动重连。' : '没有连接的设备，请先插上 USB。');
       return;
     }
-    case 'install': return install(rest[0]);
+    case 'install': {
+      const agent = rest[0];
+      install(agent);
+      // Menu daemons launched at login do not inherit the installer's shell variables.
+      if (Object.hasOwn(AGENT_CONFIG_ENV, agent) && process.env[AGENT_CONFIG_ENV[agent]]) {
+        const directory = agentConfigDirectory(agent);
+        const settings = readSavedConfig();
+        if (settings.agentConfigDirs?.[agent] === directory) return;
+        settings.agentConfigDirs = { ...settings.agentConfigDirs, [agent]: directory };
+        ensureHome();
+        writePrivateFile(CONFIG_PATH, JSON.stringify(settings, null, 2) + '\n');
+      }
+      return;
+    }
     case 'log': process.stdout.write(fs.existsSync(LOG_PATH) ? fs.readFileSync(LOG_PATH, 'utf8').split('\n').slice(-60).join('\n') + '\n' : ''); return;
     case '-v': case 'version': console.log(VERSION); return;
     default:
