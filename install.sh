@@ -67,6 +67,7 @@ mkdir -p "$install_dir/host/tools" "$install_dir/integrations/dsh"
 stage="$(mktemp -d "$install_dir/.install.XXXXXXXX")"
 trap 'rm -rf "$stage"' EXIT
 source_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+sha=
 files=(uninstall.sh host/uninstall.js host/agentreminder.js host/bluetooth.js host/codex-approval-proxy.js host/codex-approval-cli host/open-codex.sh host/configure-codex-dock.js
   host/tools/hardware-check.js integrations/dsh/cordis.patch.yml)
 if "$flash"; then
@@ -117,9 +118,19 @@ else
     mkdir -p "$stage/$(dirname "$file")"
     github_get "contents/$file?ref=$sha" application/vnd.github.raw+json > "$stage/$file"
   done
-  unset github_token
-
 fi
+# Older refs predate the Tailnet module. Fetch it only when the selected runtime uses it.
+if grep -Fq "require('./tailnet')" "$stage/host/agentreminder.js"; then
+  tailnet_file=host/tailnet.js
+  if [[ -n ${sha:-} ]]; then
+    github_get "contents/$tailnet_file?ref=$sha" application/vnd.github.raw+json > "$stage/$tailnet_file"
+  else
+    cp "$source_dir/$tailnet_file" "$stage/$tailnet_file"
+  fi
+  node --check "$stage/$tailnet_file"
+  files+=("$tailnet_file")
+fi
+unset github_token
 node --check "$stage/host/agentreminder.js"
 node --check "$stage/host/uninstall.js"
 node --check "$stage/host/bluetooth.js"

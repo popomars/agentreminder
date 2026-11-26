@@ -110,3 +110,14 @@ application. The full image remains available for the community-play installer.
 Keep one host daemon with a per-board enrollment key. Accept legacy single-board
 settings so existing enrollments survive an upgrade. Send each request ID to
 all eligible links and broadcast its first resolution to the connected devices.
+
+### ADR-0007: Mirror cards directly between selected Tailnet peers
+
+- Date: 2026-11-25
+- Status: Accepted
+
+Every participating computer runs the same daemon and connects directly to its
+peer list, discovered through Tailscale by default. Both peers prove possession
+of the shared key before any card is sent. The source daemon owns the response
+to its agent. Receivers serve cards locally without forwarding them. A separate
+Tailnet listener keeps hook administration and pairing on loopback.
