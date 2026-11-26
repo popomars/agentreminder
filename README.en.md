@@ -37,7 +37,7 @@ To move a board to a new Mac, connect it by USB and pair from the bell on the ne
 
 ### 3. Connect your agent
 
-The installer sets up hooks for detected Codex, Claude Code, and dsh installations and preserves other hooks. After installing another agent, rerun setup, for example with `bash install.sh --agent codex`.
+The installer sets up hooks for detected Codex, Claude Code, dsh, and WorkBuddy installations and preserves other hooks. If you install WorkBuddy later, choose **Agent integrations → WorkBuddy → Enable** in the bell menu or run `bash install.sh --agent workbuddy`.
 
 | Agent | After installation |
 | --- | --- |
@@ -45,6 +45,7 @@ The installer sets up hooks for detected Codex, Claude Code, and dsh installatio
 | Codex Desktop | Choose **Codex Desktop approvals → Enable…** in the bell menu. Quit ChatGPT completely, then reopen it from the usual Dock icon. Use manual approval and set the reviewer to the user. |
 | Claude Code | Open a new session. AgentReminder supports `AskUserQuestion` and, on version 2.1.76 or later, `Elicitation`. |
 | dsh | Install the Claude Code hooks bridge in your profile, merge the Cordis example, and set `configPath` to the absolute path of `~/.agentreminder/dsh-hooks.json`. [Cordis configuration](integrations/dsh/cordis.patch.yml) |
+| WorkBuddy (macOS) | Reopen WorkBuddy. Task completions are forwarded automatically. When a command triggers WorkBuddy's local security approval, the device prompts you to return to WorkBuddy to confirm. Approval reminders appear under **Notifications**. |
 
 After a real task finishes, open the bell to view the notification. Respond to approvals in the originating agent or on the device. Codex Desktop mirrors native command and file approvals, and the first response wins. If the board disconnects, times out, or hands a request back, continue in the originating conversation.
 
@@ -57,6 +58,7 @@ After a real task finishes, open the bell to view the notification. Respond to a
 | **Pair a new device…** | Adds or re-pairs a board over USB. |
 | **Install or update firmware…** | Installs the bundled firmware for the selected model. Keep USB connected while writing. Paired boards reconnect after restarting. |
 | **Send test notification** | Checks delivery to the menu and local devices. |
+| **Agent integrations** | Enables or disables WorkBuddy independently. Disabling it pauses new WorkBuddy completions and approval reminders. |
 | **Launch at login** | Appears as AgentReminder in macOS Login Items & Extensions. It starts the bell and local service, and restores the Codex Dock configuration when enabled. |
 | **Codex Desktop approvals** | Appears when a supported ChatGPT Desktop installation is found. Enable or disable the integration, then reopen the app from the usual Dock icon. If ChatGPT opens before the bell at login, reopen ChatGPT. |
 

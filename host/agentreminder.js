@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /*
  * AgentReminder host: one zero-dependency file that is
- *   - the hook entry point called by Claude Code / Codex / dsh   (`hook ...`)
+ *   - the hook entry point called by supported agents   (`hook ...`)
  *   - the background daemon that talks to the ESP32-S3           (`daemon`)
  *   - a small CLI                                                 (`status`, `test`, `wifi`, `install` ...)
  *
@@ -24,12 +24,14 @@ const crypto = require('crypto');
 const { spawn, execFileSync } = require('child_process');
 const bluetooth = require('./bluetooth');
 const tailnet = require('./tailnet');
+const workbuddy = require('./workbuddy');
 
-const VERSION = '0.5.5';
+const VERSION = '0.5.7';
 const UNKNOWN_CONVERSATION = '未命名对话';
 const HOME_DIR = process.env.AGENTREMINDER_HOME || path.join(os.homedir(), '.agentreminder');
 const CONFIG_PATH = path.join(HOME_DIR, 'config.json');
 const LOG_PATH = path.join(HOME_DIR, 'daemon.log');
+const WORKBUDDY_DIR = path.join(os.homedir(), '.workbuddy');
 const INBOX_HANDOFF_PATH = path.join(HOME_DIR, 'inbox-upgrade.json');
 
 const DEFAULT_CONFIG = {
@@ -421,9 +423,22 @@ function readBody(req) {
   });
 }
 
+function readSavedConfig() {
+  try { return JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')); }
+  catch (error) { if (error.code === 'ENOENT') return {}; throw error; }
+}
+
+function writePrivateFile(file, contents) {
+  const tmp = `${file}.${crypto.randomUUID()}.tmp`;
+  try {
+    fs.writeFileSync(tmp, contents, { mode: 0o600, flag: 'wx' });
+    fs.renameSync(tmp, file);
+  } finally { fs.rmSync(tmp, { force: true }); }
+}
+
 function savePairingConfig(usb, device) {
   ensureHome();
-  const config = fs.existsSync(CONFIG_PATH) ? JSON.parse(fs.readFileSync(CONFIG_PATH, 'utf8')) : {};
+  const config = readSavedConfig();
   config.usb = { ...config.usb, ...usb };
   if (device) {
     const devices = registeredDevices(config);
@@ -435,11 +450,7 @@ function savePairingConfig(usb, device) {
       config.bluetooth = { ...config.bluetooth, key: device.key };
     }
   }
-  const tmp = `${CONFIG_PATH}.${crypto.randomUUID()}.tmp`;
-  try {
-    fs.writeFileSync(tmp, JSON.stringify(config, null, 2) + '\n', { mode: 0o600, flag: 'wx' });
-    fs.renameSync(tmp, CONFIG_PATH);
-  } finally { fs.rmSync(tmp, { force: true }); }
+  writePrivateFile(CONFIG_PATH, JSON.stringify(config, null, 2) + '\n');
   return config;
 }
 
@@ -448,7 +459,14 @@ function runDaemon() {
   ensureHome();
   const cfg = loadConfig();
   const hub = new Hub(cfg);
-  let mesh, meshConfigError;
+  let mesh, meshConfigError, setupToken;
+  const notify = async info => mesh ? await mesh.notify(info) : hub.notify(info);
+  const workbuddyApprovals = workbuddy.createApprovalMonitor(path.join(WORKBUDDY_DIR, 'audit-log'), notify, log);
+  const authorizedSetup = req => {
+    const token = req.headers['x-agentreminder-setup'];
+    return setupToken && typeof token === 'string' && /^[0-9a-f]{64}$/.test(token) &&
+      crypto.timingSafeEqual(Buffer.from(token, 'hex'), Buffer.from(setupToken, 'hex'));
+  };
   if (cfg.tailnet?.enabled) {
     try { mesh = tailnet.createMesh(tailnet.validateConfig(cfg.tailnet), hub, log); }
     catch (error) { meshConfigError = error.message; log(meshConfigError); }
@@ -496,7 +514,7 @@ function runDaemon() {
     const reply = (code, obj) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)); };
     try {
       if (req.headers.origin) return reply(403, { error: 'browser requests are not supported' });
-      if (req.url === '/inbox' || req.url === '/inbox/read' || req.url === '/inbox/clear' || req.url === '/inbox/test' || req.url === '/firmware/prepare') {
+      if (req.url === '/inbox' || req.url === '/inbox/read' || req.url === '/inbox/clear' || req.url === '/inbox/test' || req.url === '/firmware/prepare' || req.url === '/agent-integrations') {
         if (!/^(127\.0\.0\.1|localhost)(:\d+)?$/i.test(req.headers.host || '')) {
           return reply(403, { error: 'endpoint requires a loopback host' });
         }
@@ -509,7 +527,11 @@ function runDaemon() {
           if (!target) approvals.set(payload.id, payload);
         }
         for (const [id, { card }] of mesh?.outgoing || []) approvals.set(id, card);
-        return reply(200, { canClear: true, canUpdateFirmware: true, canSendTest: true, groupsNotifications: true, notifications, unread: notifications.filter(note => note.unread).length,
+        return reply(200, {
+          canClear: true, canUpdateFirmware: true, canSendTest: true, groupsNotifications: true,
+          canManageIntegrations: !!setupToken,
+          agentIntegrations: { workbuddy: workbuddyStatus(cfg) },
+          notifications, unread: notifications.filter(note => note.unread).length,
           approvals: [...approvals.values()].map(inboxCard),
           devices: new Set(hub.readyLinks().map(link => link.info.id)).size });
       }
@@ -556,6 +578,21 @@ function runDaemon() {
           detail: english ? 'AgentReminder received your test notification.' : 'AgentReminder 已收到测试通知。' });
         return reply(200, { delivered });
       }
+      if (req.url === '/agent-integrations') {
+        if (!authorizedSetup(req)) return reply(403, { error: 'unauthorized' });
+        const { agent, enabled } = body || {};
+        if (agent !== 'workbuddy' || typeof enabled !== 'boolean') {
+          return reply(400, { error: 'invalid-integration' });
+        }
+        const config = readSavedConfig();
+        const installedHooks = enabled && !workbuddyHasHook();
+        if (installedHooks) install(agent, () => {});
+        const agentIntegrations = { ...config.agentIntegrations, [agent]: enabled };
+        writePrivateFile(CONFIG_PATH, JSON.stringify({ ...config, agentIntegrations }, null, 2) + '\n');
+        cfg.agentIntegrations = agentIntegrations;
+        workbuddyApprovals.setEnabled(enabled);
+        return reply(200, { status: workbuddyStatus(cfg), ...(installedHooks ? { installedHooks } : {}) });
+      }
       if (req.url === '/firmware/prepare') {
         if (!firmwareUpdateActive()) return reply(409, { error: 'firmware-update-inactive' });
         if (hub.pending.size || mesh?.outgoing.size) return reply(409, { error: 'approval-pending' });
@@ -592,7 +629,8 @@ function runDaemon() {
       }
       if (req.url === '/notify') {
         const info = body.info || {};
-        return reply(200, { delivered: mesh ? await mesh.notify(info) : hub.notify(info) });
+        if (!integrationAllowed(cfg, info.agent)) return reply(200, { delivered: 0 });
+        return reply(200, { delivered: await notify(info) });
       }
       if (req.url === '/raw') {
         if (body.t === 'ble-pair') return reply(409, { error: 'use USB pairing' });
@@ -616,11 +654,17 @@ function runDaemon() {
     } catch (error) {
       if (error.code !== 'ENOENT') log('could not restore inbox after upgrade', error.message);
     }
+    try {
+      const token = crypto.randomBytes(32).toString('hex');
+      writePrivateFile(path.join(HOME_DIR, 'menu-setup.token'), token + '\n');
+      setupToken = token;
+    } catch (error) { log('could not create local menu setup token', error.code || 'write failed'); }
     // Only the process that owns the HTTP port may open the device transports.
     ble = bluetooth.startBluetooth(hub, Link, log);
     usb = startUsb(hub, cfg);
     startWifi(hub, cfg);
     mesh?.start();
+    workbuddyApprovals.setEnabled(workbuddyStatus(cfg) === 'enabled');
     setInterval(() => {
       const devices = hub.pairings();
       const upgrade = cfg.bluetooth.enabled && bluetooth.available() &&
@@ -840,8 +884,9 @@ function codexThread(sessionId) {
 }
 
 function describeSession(input, agent, fallbackCwd = '') {
-  const sessionId = input.session_id || input.thread_id || '';
-  const explicit = input.conversation_title || input.session_title || input.thread_title || input.session_name;
+  const sessionId = input.session_id || input.thread_id || (agent === 'workbuddy' && input.sessionId) || '';
+  const explicit = input.conversation_title || input.session_title || input.thread_title || input.session_name ||
+    (agent === 'workbuddy' && (input.conversationTitle || input.sessionTitle));
   const cwd = typeof input.cwd === 'string' ? input.cwd : '';
   const thread = agent === 'codex' && (!explicit || !cwd) ? codexThread(sessionId) : {};
   const title = explicit || thread.title || transcriptTitle(input.transcript_path, sessionId);
@@ -909,14 +954,16 @@ function arg(argv, name, def) {
 }
 
 async function runHook(argv) {
-  const agent = arg(argv, 'agent', 'agent');          // claude | codex | dsh
+  const agent = arg(argv, 'agent', 'agent');
   const event = arg(argv, 'event', 'permission');     // permission | pretool | stop | notification
+  if (agent === 'workbuddy' && event !== 'stop') return;
   if (agent === 'codex' && event === 'permission' && process.env.AGENTREMINDER_CODEX_DUAL_APPROVAL === '1') {
     // The app-server proxy mirrors the native request after Codex creates it.
     return;
   }
   const input = await readStdin();
   const cfg = loadConfig();
+  if (!integrationAllowed(cfg, agent)) return;
   const session = describeSession(input, agent, process.cwd());
   const out = (obj) => { if (obj) process.stdout.write(JSON.stringify(obj)); };
 
@@ -983,13 +1030,25 @@ async function runHook(argv) {
 
 /* -------------------------------- CLI ------------------------------- */
 
-function mergeHooks(file, hooks) {
+function integrationAllowed(config, agent) {
+  return agent !== 'workbuddy' || config.agentIntegrations?.workbuddy !== false;
+}
+
+function mergeHooks(file, hooks, agent) {
   let cur = {};
   if (fs.existsSync(file)) cur = JSON.parse(fs.readFileSync(file, 'utf8'));
   if (!cur || typeof cur !== 'object' || Array.isArray(cur)) throw new Error('Invalid settings: ' + file);
   cur.hooks = cur.hooks || {};
   for (const [ev, groups] of Object.entries(hooks)) {
-    const keep = (cur.hooks[ev] || []).filter(g => !JSON.stringify(g).includes('agentreminder.js'));
+    const existing = cur.hooks[ev] || [];
+    const keep = agent
+      ? existing.flatMap(group => {
+        if (!Array.isArray(group?.hooks)) return [group];
+        const rules = group.hooks.filter(hook => managedHookAgent(hook) !== agent);
+        if (rules.length === group.hooks.length) return [group];
+        return rules.length ? [{ ...group, hooks: rules }] : [];
+      })
+      : existing.filter(group => !JSON.stringify(group).includes('agentreminder.js'));
     if (keep.length || groups.length) cur.hooks[ev] = [...keep, ...groups];
     else delete cur.hooks[ev];
   }
@@ -1006,7 +1065,30 @@ const hookSettings = {
   codex: path.join(process.env.CODEX_HOME || path.join(os.homedir(), '.codex'), 'hooks.json'),
   claude: path.join(os.homedir(), '.claude', 'settings.json'),
   dsh: path.join(HOME_DIR, 'dsh-hooks.json'),
+  workbuddy: path.join(WORKBUDDY_DIR, 'settings.json'),
 };
+
+// Match the hook command generated by install, including installations from a checkout.
+const managedCommand = /^'(?:[^']|'\\'')+' '(?:[^']|'\\'')*\/host\/agentreminder\.js' hook --agent (codex|claude|dsh|workbuddy) --event (permission|pretool|stop|notification|question|elicitation)$/;
+
+function managedHookAgent(hook) {
+  return hook?.type === 'command' && typeof hook.command === 'string' ? hook.command.match(managedCommand)?.[1] : undefined;
+}
+
+function workbuddyHasHook() {
+  let file;
+  try { file = JSON.parse(fs.readFileSync(hookSettings.workbuddy, 'utf8')); }
+  catch (error) { if (error.code === 'ENOENT') return false; throw error; }
+  const groups = file?.hooks?.Stop;
+  return Array.isArray(groups) && groups.some(group =>
+    Array.isArray(group?.hooks) && group.hooks.some(hook => managedHookAgent(hook) === 'workbuddy'));
+}
+
+function workbuddyStatus(config) {
+  if (!integrationAllowed(config, 'workbuddy')) return 'disabled';
+  try { return workbuddyHasHook() ? 'enabled' : 'unconfigured'; }
+  catch (_) { return 'unavailable'; }
+}
 
 function claudeElicitationSupported() {
   try {
@@ -1018,7 +1100,7 @@ function claudeElicitationSupported() {
   } catch (_) { return false; }
 }
 
-function install(target) {
+function install(target, report = console.log) {
   const t = (cfg) => ({ type: 'command', command: cfg.cmd, timeout: cfg.timeout });
   const appr = loadConfig().approvalTimeoutSec + 30;
   if (target === 'codex') {
@@ -1026,7 +1108,7 @@ function install(target) {
       PermissionRequest: [{ hooks: [t({ cmd: hookCmd('codex', 'permission'), timeout: appr })] }],
       Stop: [{ hooks: [t({ cmd: hookCmd('codex', 'stop'), timeout: 10 })] }],
     });
-    console.log(`已写入 ${f}\n在 Codex 里运行 /hooks 审核并信任这些 hook。`);
+    report(`已写入 ${f}\n在 Codex 里运行 /hooks 审核并信任这些 hook。`);
   } else if (target === 'dsh') {
     const f = mergeHooks(hookSettings.dsh, {
       PreToolUse: [{ matcher: loadConfig().dshMatcher || 'bash|shell|write|edit|apply_patch|Bash|Shell|Write|Edit|MultiEdit',
@@ -1035,7 +1117,7 @@ function install(target) {
       Notification: [{ matcher: 'agent_needs_input|elicitation_dialog|elicitation_url_dialog', hooks: [t({ cmd: hookCmd('dsh', 'notification'), timeout: 10 })] }],
       Stop: [{ hooks: [t({ cmd: hookCmd('dsh', 'stop'), timeout: 10 })] }],
     });
-    console.log(`已写入 ${f}\n把 integrations/dsh/cordis.patch.yml 里的 configPath 指向它（见 README）。`);
+    report(`已写入 ${f}\n把 integrations/dsh/cordis.patch.yml 里的 configPath 指向它（见 README）。`);
   } else if (target === 'claude') {
     const elicitation = claudeElicitationSupported();
     const notifications = 'idle_prompt|agent_needs_input|auth_storage_failure|quota_auto_resume_disabled';
@@ -1047,9 +1129,14 @@ function install(target) {
         hooks: [t({ cmd: hookCmd('claude', 'notification'), timeout: 10 })] }],
       Stop: [{ hooks: [t({ cmd: hookCmd('claude', 'stop'), timeout: 10 })] }],
     });
-    console.log(`已写入 ${f}（推荐改用插件方式安装，见 README）`);
+    report(`已写入 ${f}（推荐改用插件方式安装，见 README）`);
+  } else if (target === 'workbuddy') {
+    const f = mergeHooks(hookSettings.workbuddy, {
+      Stop: [{ hooks: [t({ cmd: hookCmd(target, 'stop'), timeout: 10 })] }],
+    }, target);
+    report(`已写入 ${f}。请重开 WorkBuddy。`);
   } else {
-    console.log('用法: agentreminder install codex|dsh|claude');
+    report('用法: agentreminder install codex|dsh|claude|workbuddy');
   }
 }
 
@@ -1107,7 +1194,7 @@ async function main() {
   pair                              通过 USB 配对，需在设备上确认
   test                              向设备发测试通知和审批
   wifi <SSID> <密码>                通过 USB 给设备配 Wi-Fi
-  install codex|dsh|claude          手动写入 hook 配置
+  install codex|dsh|claude|workbuddy 手动写入 hook 配置
   hook --agent <a> --event <e>      (由 agent 调用)`);
   }
 }
@@ -1117,4 +1204,4 @@ if (require.main === module) {
   main().catch(e => { console.error(e.message); process.exitCode = 1; });
 }
 
-module.exports = { Hub, Link, mergeHooks, describeTool, describeSession, transcriptTitle, questionCard, formCard, shellQuote, call, ensureDaemon, stopLocalDaemon, loadConfig, HOME_DIR, hookSettings };
+module.exports = { Hub, Link, mergeHooks, describeTool, describeSession, transcriptTitle, questionCard, formCard, shellQuote, call, ensureDaemon, stopLocalDaemon, loadConfig, HOME_DIR, hookSettings, managedHookAgent };

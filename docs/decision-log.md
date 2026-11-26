@@ -162,3 +162,15 @@ behavior. Touch targets follow the edge with the physical keys. Waveshare
 keeps its left, center and right approval actions. Sound uses the shared
 preference, and the square panel uses LVGL rotation and matching touch input
 when the controls move to the right edge.
+
+### ADR-0011: Remind users to confirm WorkBuddy command approvals on the Mac
+
+- Date: 2026-11-26
+- Status: Accepted
+
+WorkBuddy Desktop forwards task completion through its `Stop` hook.
+WorkBuddy 5.11.3 emits a command safety audit event when its native approval
+appears. The existing AgentReminder daemon reads that event from the live
+spool or daily audit file and sends a notification. It deduplicates both
+sources and omits shell commands and arguments. The user makes the approval
+decision in WorkBuddy. One menu switch controls both WorkBuddy paths.

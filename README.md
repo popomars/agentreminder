@@ -37,7 +37,7 @@ curl -fsS -H 'Accept: application/vnd.github.raw+json' \
 
 ### 3. 接入你的 agent
 
-安装器会为检测到的 Codex、Claude Code 和 dsh 写入对应 hooks，保留其他 hooks。新装 agent 后可重跑安装脚本，例如 `bash install.sh --agent codex`。
+安装器会为检测到的 Codex、Claude Code、dsh 和 WorkBuddy 写入对应 hooks，保留其他 hooks。如果先装了 AgentReminder，再安装 WorkBuddy，可在铃铛里选择 **Agent 接入 → WorkBuddy → 启用**，或运行 `bash install.sh --agent workbuddy`。
 
 | Agent | 安装后要做什么 |
 | --- | --- |
@@ -45,6 +45,7 @@ curl -fsS -H 'Accept: application/vnd.github.raw+json' \
 | Codex 桌面端 | 从铃铛选择 **Codex 桌面双端审批 → 启用…**，完全退出 ChatGPT，再从原来的 Dock 图标打开。需要审批时用手动审批，审核人设为用户。 |
 | Claude Code | 开启新会话。支持 `AskUserQuestion`，2.1.76 及更新版本还支持 `Elicitation`。 |
 | dsh | 在 profile 中安装 Claude Code hooks 桥接，合并 Cordis 示例，并将 `configPath` 指向 `~/.agentreminder/dsh-hooks.json` 的绝对路径。 [Cordis 配置示例](integrations/dsh/cordis.patch.yml) |
+| WorkBuddy（macOS） | 重开 WorkBuddy。任务完成自动通知；命令触发 WorkBuddy 本地安全审批时，设备会提醒回 WorkBuddy 确认。审批提醒显示在「通知」。 |
 
 真实任务完成后，打开铃铛查看通知。遇到审批时，在原 agent 或设备上处理。Codex 双端审批支持原生命令和文件修改，先处理的一端生效。设备断线、超时或选择「回电脑继续」时，在原对话里继续操作。
 
@@ -57,6 +58,7 @@ curl -fsS -H 'Accept: application/vnd.github.raw+json' \
 | **配对新设备…** | 通过 USB 添加或重新配对设备。 |
 | **安装或更新固件…** | 选择板型，从安装包写入固件。写入时保持 USB 连接。已经配对的设备重启后会重连。 |
 | **发送测试通知** | 快速验证菜单栏和本机设备是否能收卡。 |
+| **Agent 接入** | 从菜单独立启用或停用 WorkBuddy。停用会暂停该 Agent 的新任务通知和审批提醒。 |
 | **登录时启动** | 在 macOS「登录项与扩展」中显示为 AgentReminder。它启动铃铛和后台服务，并恢复已启用的 Codex Dock 配置。 |
 | **Codex 桌面双端审批** | 检测到支持的 ChatGPT 桌面安装时显示。可启用或停用转接，用原来的 Dock 图标重开即可生效。如果登录时 ChatGPT 比铃铛先打开，请重开 ChatGPT。 |
 

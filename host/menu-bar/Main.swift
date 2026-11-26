@@ -74,6 +74,8 @@ private struct Inbox: Decodable {
     let canClear: Bool?
     let canUpdateFirmware: Bool?
     let canSendTest: Bool?
+    let canManageIntegrations: Bool?
+    let agentIntegrations: [String: String]?
 }
 
 private struct Pairing: Decodable {
@@ -83,6 +85,7 @@ private struct Pairing: Decodable {
 }
 
 private struct ReadResult: Decodable { let ok: Bool }
+private struct AgentIntegrationResult: Decodable { let status: String; let installedHooks: Bool? }
 private struct TestResult: Decodable { let delivered: Int }
 
 private enum FirmwareBoard: String, CaseIterable {
@@ -129,6 +132,7 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var pairing = false
     private var setupUsb = ProcessInfo.processInfo.arguments.contains("--setup-usb")
     private var configuringCodex = false
+    private var updatingWorkBuddy = false
     private var trackingMenu = false
     private var firmwareUpdate: FirmwareUpdate?
 
@@ -222,6 +226,11 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         request.timeoutInterval = timeout
         request.httpBody = body
         if method == "POST" { request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
+        if path == "agent-integrations" {
+            let tokenFile = installation.stateDirectory.appendingPathComponent("menu-setup.token")
+            let token = try String(contentsOf: tokenFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+            request.setValue(token, forHTTPHeaderField: "X-AgentReminder-Setup")
+        }
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse,
               (200..<300).contains(http.statusCode) || (path == "pair" && http.statusCode == 409)
@@ -360,6 +369,7 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         menu.addItem(action(label("发送测试通知", "Send test notification"), #selector(sendTest),
                             enabled: inbox?.canSendTest == true && firmwareUpdate == nil))
+        addWorkBuddyIntegration()
         if installation.codexApp != nil {
             let codex = action(label("Codex 桌面双端审批", "Codex Desktop approvals"))
             let options = NSMenu(title: codex.title)
@@ -385,6 +395,61 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func retry() { startService(force: true) }
     @objc private func quit() { NSApp.terminate(nil) }
+
+    private func addWorkBuddyIntegration() {
+        let state = inbox?.agentIntegrations?["workbuddy"]
+        let status: String
+        switch state {
+        case "enabled": status = label("已启用", "Enabled")
+        case "disabled": status = label("已停用", "Disabled")
+        case "unconfigured": status = label("待配置", "Not configured")
+        default: status = label("状态不可用", "Status unavailable")
+        }
+        let integrations = action(label("Agent 接入", "Agent integrations"))
+        let agents = NSMenu(title: integrations.title)
+        let workbuddy = action("WorkBuddy · \(status)")
+        let options = NSMenu(title: "WorkBuddy")
+        options.autoenablesItems = false
+        let ready = inbox?.canManageIntegrations == true && !updatingWorkBuddy
+        for enabled in [true, false] {
+            let option = action(enabled ? label("启用", "Enable") : label("停用", "Disable"),
+                                #selector(toggleWorkBuddy(_:)), enabled: ready)
+            option.state = state == (enabled ? "enabled" : "disabled") ? .on : .off
+            option.representedObject = enabled
+            options.addItem(option)
+        }
+        options.addItem(.separator())
+        options.addItem(action(label("命令审批请回 WorkBuddy 确认", "Confirm command approvals in WorkBuddy"),
+                               enabled: false))
+        workbuddy.submenu = options
+        agents.addItem(workbuddy)
+        integrations.submenu = agents
+        menu.addItem(integrations)
+    }
+
+    @objc private func toggleWorkBuddy(_ sender: NSMenuItem) {
+        guard inbox?.canManageIntegrations == true, !updatingWorkBuddy,
+              let enabled = sender.representedObject as? Bool else { return }
+        updatingWorkBuddy = true
+        redraw()
+        Task {
+            defer { updatingWorkBuddy = false; refresh(); redraw() }
+            do {
+                let body = try JSONSerialization.data(withJSONObject: ["agent": "workbuddy", "enabled": enabled])
+                let result: AgentIntegrationResult = try await request("agent-integrations", method: "POST", body: body)
+                guard result.status == (enabled ? "enabled" : "disabled") else { throw URLError(.badServerResponse) }
+                if result.installedHooks == true {
+                    showAlert(label("已配置 WorkBuddy", "WorkBuddy configured"),
+                              label("请重开 WorkBuddy。设备会收到任务完成通知和命令待确认提醒。",
+                                    "Reopen WorkBuddy to receive task completions and command approval reminders on your device."))
+                }
+            } catch {
+                showAlert(label("无法更新 WorkBuddy 接入", "Could not update WorkBuddy"),
+                          label("请检查本机服务和 WorkBuddy 的 hook 配置后重试。",
+                                "Check the local service and the WorkBuddy hook configuration, then try again."))
+            }
+        }
+    }
 
     private func registerAtLogin() {
         let service = SMAppService.mainApp
