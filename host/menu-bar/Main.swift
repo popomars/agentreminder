@@ -1,5 +1,6 @@
 import AppKit
 import ServiceManagement
+import UniformTypeIdentifiers
 
 private struct Installation: Decodable {
     let node: String
@@ -22,13 +23,31 @@ private struct Installation: Decodable {
     var legacyApp: URL { stateDirectory.appendingPathComponent("app/AgentReminder.app") }
     var codexSetup: URL { stateDirectory.appendingPathComponent("app/host/configure-codex-dock.js") }
 
+    private static let codexBundleIDs = ["com.openai.codex", "com.openai.chat"]
+    private var codexAppPreference: String { "CodexAppPath:" + statePath }
+
+    func supportsCodexApp(_ app: URL) -> Bool {
+        guard let id = Bundle(url: app)?.bundleIdentifier, Self.codexBundleIDs.contains(id) else { return false }
+        let cli = app.appendingPathComponent("Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex")
+        return FileManager.default.isExecutableFile(atPath: cli.path)
+    }
+
+    func selectCodexApp(_ app: URL) {
+        UserDefaults.standard.set(app.path, forKey: codexAppPreference)
+    }
+
     var codexApp: URL? {
-        let locations = [URL(fileURLWithPath: "/Applications"), FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("Applications")]
-        return locations.map { $0.appendingPathComponent("ChatGPT.app") }.first { app in
-            let cli = app.appendingPathComponent("Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex")
-            return FileManager.default.isExecutableFile(atPath: cli.path)
+        if let path = UserDefaults.standard.string(forKey: codexAppPreference) {
+            let selected = URL(fileURLWithPath: path)
+            if supportsCodexApp(selected) { return selected }
         }
+        let running = Self.codexBundleIDs.flatMap {
+            NSRunningApplication.runningApplications(withBundleIdentifier: $0).compactMap(\.bundleURL)
+        }
+        let registered = Self.codexBundleIDs.flatMap { NSWorkspace.shared.urlsForApplications(withBundleIdentifier: $0) }
+        let standard = [URL(fileURLWithPath: "/Applications/ChatGPT.app"),
+                        FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Applications/ChatGPT.app")]
+        return (running + registered + standard).first(where: supportsCodexApp)
     }
 
     var processEnvironment: [String: String] {
@@ -97,6 +116,14 @@ private struct Inbox: Decodable {
     let tailnetListening: Bool?
     let canManageIntegrations: Bool?
     let agentIntegrations: [String: String]?
+    let canManageSleepPrevention: Bool?
+    let sleepPrevention: SleepPrevention?
+}
+
+private struct SleepPrevention: Decodable {
+    let supported: Bool
+    let enabled: Bool
+    let active: Bool
 }
 
 private struct Pairing: Decodable {
@@ -179,9 +206,11 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var pairing = false
     private var setupUsb = ProcessInfo.processInfo.arguments.contains("--setup-usb")
     private var configuringCodex = false
+    private var changingSleepPrevention = false
     private var codexDockStatus: CodexDockStatus?
     private var codexStatusCheck: Task<Void, Never>?
     private var codexMenuItem: NSMenuItem?
+    private var notificationMenuItem: NSMenuItem?
     private var configuringTailnet = false
     private var updatingHookAgents: Set<AgentIntegration> = []
     private var checkingUpdates = false
@@ -251,7 +280,7 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Task {
             if installation.usesDefaultStateDirectory {
                 do {
-                    let result = try await runCodexSetup("restore")
+                    let result = try await runCodexSetup("restore", app: installation.codexApp)
                     if result.exitCode != 0 {
                         NSLog("AgentReminder could not restore Codex Dock configuration: %@",
                               String(decoding: result.output, as: UTF8.self))
@@ -280,7 +309,7 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         request.timeoutInterval = timeout
         request.httpBody = body
         if method == "POST" { request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
-        if path == "tailnet/setup" || path == "agent-integrations" {
+        if path == "tailnet/setup" || path == "agent-integrations" || path == "sleep-prevention" {
             let tokenFile = installation.stateDirectory.appendingPathComponent("menu-setup.token")
             let token = try String(contentsOf: tokenFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
             request.setValue(token, forHTTPHeaderField: "X-AgentReminder-Setup")
@@ -377,6 +406,7 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func addCards(_ cards: [Card], title: String, notifications: Bool = false) {
         let entry = action(title, enabled: !cards.isEmpty)
+        if notifications { notificationMenuItem = entry }
         if !cards.isEmpty {
             let list = NSMenu(title: title)
             list.autoenablesItems = false
@@ -414,16 +444,27 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func redraw() {
-        guard !trackingMenu else { return }
+        if let inbox {
+            item.button?.title = label("通知 \(inbox.unread) · 审批 \(inbox.approvals.count)",
+                                       "\(inbox.unread) new · \(inbox.approvals.count) approvals")
+        }
+        if trackingMenu {
+            guard let inbox, let entry = notificationMenuItem else { return }
+            let visibleIds = Set(inbox.notifications.map(\.id))
+            entry.title = label("通知（\(inbox.unread) 未读）", "Notifications (\(inbox.unread) unread)")
+            for row in entry.submenu?.items ?? [] {
+                if let card = row.representedObject as? Card, !visibleIds.contains(card.id) { row.isHidden = true }
+            }
+            return
+        }
         menu.removeAllItems()
         codexMenuItem = nil
+        notificationMenuItem = nil
         if installingUpdate {
             menu.addItem(action(label("正在安装 AgentReminder 更新…", "Installing AgentReminder update…"), enabled: false))
             return
         }
         if let inbox {
-            item.button?.title = label("通知 \(inbox.unread) · 审批 \(inbox.approvals.count)",
-                                       "\(inbox.unread) new · \(inbox.approvals.count) approvals")
             menu.addItem(action(label("已连接 \(inbox.devices) 台设备", "\(inbox.devices) connected devices"), enabled: false))
             addCards(inbox.notifications, title: label("通知（\(inbox.unread) 未读）", "Notifications (\(inbox.unread) unread)"),
                      notifications: true)
@@ -448,6 +489,12 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         addTailnetMenu()
         addAgentIntegrations()
         menu.addItem(.separator())
+        let sleep = action(label("阻止闲置睡眠", "Prevent idle sleep"), #selector(toggleSleepPrevention),
+                           enabled: inbox?.canManageSleepPrevention == true && !changingSleepPrevention)
+        if let prevention = inbox?.sleepPrevention, prevention.enabled {
+            sleep.state = prevention.active ? .on : .mixed
+        }
+        menu.addItem(sleep)
         let login = action(label("登录时启动", "Launch at login"), #selector(toggleLoginItem))
         switch SMAppService.mainApp.status {
         case .enabled: login.state = .on
@@ -462,6 +509,25 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     @objc private func retry() { startService(force: true) }
     @objc private func quit() { NSApp.terminate(nil) }
+
+    @objc private func toggleSleepPrevention() {
+        guard inbox?.canManageSleepPrevention == true, let prevention = inbox?.sleepPrevention,
+              prevention.supported, !changingSleepPrevention else { return }
+        changingSleepPrevention = true
+        redraw()
+        Task {
+            defer { changingSleepPrevention = false; refresh(); redraw() }
+            do {
+                let body = try JSONEncoder().encode(["enabled": !prevention.enabled])
+                let result: ReadResult = try await request("sleep-prevention", method: "POST", body: body)
+                guard result.ok else { throw URLError(.badServerResponse) }
+                inbox = try await request("inbox")
+            } catch {
+                showAlert(label("无法更改闲置睡眠设置", "Could not change the idle sleep setting"),
+                          label("请检查本机 AgentReminder 服务。", "Check the local AgentReminder service."))
+            }
+        }
+    }
 
     private func registerAtLogin() {
         let service = SMAppService.mainApp
@@ -793,6 +859,10 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 option.representedObject = AgentIntegration.Action(agent: agent, enabled: enabled)
                 options.addItem(option)
             }
+            if agent == .codexDesktop {
+                options.addItem(.separator())
+                options.addItem(action(label("选择桌面应用…", "Choose Desktop App…"), #selector(chooseCodexApp)))
+            }
             let hint: String?
             switch agent {
             case .codex:
@@ -821,10 +891,11 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func updateAgentMenuItem(_ row: NSMenuItem, agent: AgentIntegration) {
         let state: IntegrationStatus
         let ready: Bool
+        let codexApp = agent == .codexDesktop ? installation.codexApp : nil
         if agent == .codexDesktop {
-            state = installation.codexApp == nil
+            state = codexApp == nil
                 ? .notInstalled : codexDockStatus.map { $0.dockOverrideActive ? .enabled : .disabled } ?? .unavailable
-            ready = installation.codexApp != nil && !configuringCodex
+            ready = !configuringCodex
         } else {
             state = inbox?.agentIntegrations?[agent.rawValue].flatMap(IntegrationStatus.init(rawValue:)) ?? .unavailable
             ready = inbox?.canManageIntegrations == true && !updatingHookAgents.contains(agent)
@@ -833,9 +904,13 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
             ? label("Hooks 已配置", "Hooks configured") : integrationStatusLabel(state)
         row.title = "\(integrationTitle(agent)) · \(status)"
         for option in row.submenu?.items ?? [] {
+            if option.action == #selector(chooseCodexApp) {
+                option.isEnabled = ready
+                option.toolTip = codexApp?.path
+            }
             guard let action = option.representedObject as? AgentIntegration.Action else { continue }
             option.state = state == (action.enabled ? .enabled : .disabled) ? .on : .off
-            option.isEnabled = ready
+            option.isEnabled = ready && (agent != .codexDesktop || !action.enabled || state != .notInstalled)
         }
     }
 
@@ -915,13 +990,14 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    private func readCodexStatus(app: URL) async -> CodexDockStatus? {
+    private func readCodexStatus(app: URL?) async -> CodexDockStatus? {
         guard let result = try? await runCodexSetup("status", app: app), result.exitCode == 0 else { return nil }
         return try? JSONDecoder().decode(CodexDockStatus.self, from: result.output)
     }
 
     private func refreshCodexStatus() {
-        guard !configuringCodex, let app = installation.codexApp else { return }
+        guard !configuringCodex else { return }
+        let app = installation.codexApp
         codexStatusCheck?.cancel()
         codexStatusCheck = Task {
             let status = await readCodexStatus(app: app)
@@ -931,8 +1007,27 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    @objc private func chooseCodexApp() {
+        let picker = NSOpenPanel()
+        picker.allowedContentTypes = [.applicationBundle]
+        picker.message = label("选择包含 Codex 的桌面应用。", "Choose the desktop app that contains Codex.")
+        picker.directoryURL = installation.codexApp?.deletingLastPathComponent()
+        NSApp.activate(ignoringOtherApps: true)
+        guard picker.runModal() == .OK, let app = picker.url else { return }
+        guard installation.supportsCodexApp(app) else {
+            showAlert(label("无法使用此应用", "This app is unsupported"),
+                      label("请选择包含 Codex CLI 的 OpenAI 桌面应用。", "Choose an OpenAI desktop app with the bundled Codex CLI."))
+            return
+        }
+        installation.selectCodexApp(app)
+        if codexDockStatus?.dockOverrideActive == true { configureCodex(enabled: true) }
+        else { refreshCodexStatus(); redraw() }
+    }
+
     private func configureCodex(enabled: Bool) {
-        guard !configuringCodex, let app = installation.codexApp else { return }
+        guard !configuringCodex else { return }
+        let app = installation.codexApp
+        guard !enabled || app != nil else { return }
         let command = enabled ? "install" : "uninstall"
         configuringCodex = true
         codexStatusCheck?.cancel()
@@ -948,6 +1043,7 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
                               String(decoding: result.output, as: UTF8.self))
                     return
                 }
+                guard let app else { return }
 
                 let restart = NSAlert()
                 restart.messageText = "\(integrationTitle(.codexDesktop)) · \(integrationStatusLabel(enabled ? .enabled : .disabled))"

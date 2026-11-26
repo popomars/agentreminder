@@ -79,10 +79,10 @@ fi
 # Native Claude Code installs here even before a shell has added it to PATH.
 export PATH="$PATH:$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin"
 if "$install_hooks" && (( ${#agents[@]} == 0 )); then
-  if command -v codex >/dev/null || [[ -d ${CODEX_HOME:-"$HOME/.codex"} ||
+  if command -v codex >/dev/null || [[ -n ${CODEX_HOME:-} || -d "$HOME/.codex" ||
     -x "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex" ||
     -x "$HOME/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex" ]]; then agents+=(codex); fi
-  if command -v claude >/dev/null || [[ -d ${CLAUDE_CONFIG_DIR:-"$HOME/.claude"} ]]; then agents+=(claude); fi
+  if command -v claude >/dev/null || [[ -n ${CLAUDE_CONFIG_DIR:-} || -d "$HOME/.claude" ]]; then agents+=(claude); fi
   if command -v dsh >/dev/null; then agents+=(dsh); fi
   if [[ -d "$HOME/.workbuddy" || -d /Applications/WorkBuddy.app || -d "$HOME/Applications/WorkBuddy.app" ]]; then
     auto_workbuddy=true

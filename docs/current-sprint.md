@@ -40,9 +40,20 @@ notifications left the pending approval in place. Clearing both reset the two
 counts, withdrew the card from the physical device, and returned the approval
 to its originating client.
 
+Dismissed notifications now clear by card ID across boards and Mac inboxes
+on the same host or Tailnet group. This keeps newer cards from the same
+conversation visible and lets reconnecting boards catch up on recent clears.
+
+The macOS daemon can prevent idle sleep while retaining normal display sleep.
+The bell toggles the persisted setting, and the assertion follows the daemon's
+lifetime.
+
 The Agent integrations menu shows Codex Desktop approvals alongside the hook
 integrations, with shared status labels and enable/disable controls. Changing
 the Codex setting offers to reopen ChatGPT now or later.
+Codex Desktop can be discovered through macOS or selected from the menu.
+The installer retains the Claude executable found on the shell's PATH so
+menu setup can detect hook support after login.
 
 The Tailnet service menu provides separate Initialize, Join, and View shared
 key actions. The installer can open Initialize with `--init-tailnet`. A Mac

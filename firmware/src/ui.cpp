@@ -39,6 +39,7 @@ static lv_obj_t *soundStatusToast;
 static uint32_t soundStatusUntil;
 static std::vector<Item> approvals;   // oldest first
 static std::vector<Item> notes;       // newest first, max 20
+static std::vector<String> dismissedNotes;
 static lv_obj_t *content;
 static lv_obj_t *approvalCountLabel;
 static String displayedApprovalId;
@@ -188,8 +189,9 @@ static void moveNote(int step) {
 
 static void dismissNote() {
   if (selectedNote >= notes.size()) return;
-  notes.erase(notes.begin() + selectedNote);
-  dirty = true;
+  const String id = notes[selectedNote].id;
+  ui_dismiss_notify(id);
+  sendNotificationDismissal(id);
 }
 
 static void toggleSound(uint32_t now);
@@ -851,6 +853,7 @@ static bool sameCompletion(const Item &a, const Item &b) {
 }
 
 void ui_add_notify(const Item &it) {
+  if (std::find(dismissedNotes.begin(), dismissedNotes.end(), it.id) != dismissedNotes.end()) return;
   auto existing = std::find_if(notes.begin(), notes.end(), [&](const Item &note) {
     return note.id == it.id || sameCompletion(note, it);
   });
@@ -865,6 +868,20 @@ void ui_add_notify(const Item &it) {
   selectedNote = 0;
   notification_sound_notify();
   wake(); dirty = true;
+}
+
+void ui_dismiss_notify(const String &id) {
+  if (std::find(dismissedNotes.begin(), dismissedNotes.end(), id) == dismissedNotes.end()) {
+    if (dismissedNotes.size() == NOTIFICATION_DISMISSAL_LIMIT) dismissedNotes.erase(dismissedNotes.begin());
+    dismissedNotes.push_back(id);
+  }
+  auto note = std::find_if(notes.begin(), notes.end(), [&](const Item &item) { return item.id == id; });
+  if (note == notes.end()) return;
+  const size_t index = note - notes.begin();
+  notes.erase(note);
+  if (index < selectedNote) --selectedNote;
+  if (selectedNote >= notes.size()) selectedNote = notes.empty() ? 0 : notes.size() - 1;
+  dirty = true;
 }
 
 void ui_remove(const String &id) {

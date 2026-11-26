@@ -32,7 +32,7 @@ test('real hook processes → daemon → TCP device → agent-compatible JSON', 
       buf += d; let i;
       while ((i = buf.indexOf('\n')) >= 0) {
         const m = JSON.parse(buf.slice(0, i)); buf = buf.slice(i + 1); received.push(m);
-        if (m.t === 'hello') sock.write('{"t":"hello","app":"agentreminder","id":"flow-test","interaction":true}\n');
+        if (m.t === 'hello') sock.write('{"t":"hello","app":"agentreminder","id":"flow-test","interaction":true,"notificationDismissals":true}\n');
         if (m.t === 'approval' && decision) sock.write(JSON.stringify({ t: 'decision', id: m.id, decision }) + '\n');
       }
     });
@@ -185,6 +185,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   assert.equal(sameGroup[0].title, '同组的新通知');
   assert.match(sameGroup[0].receivedTime, /^\d{2}-\d{2} \d{2}:\d{2}$/);
   assert.deepEqual(await clearInbox(snapshot.notifications.map(note => note.id)), { ok: true });
+  await until(() => received.some(message => message.t === 'dismiss' && message.ids.includes(completion.id)));
   const remaining = await inbox();
   assert.deepEqual(remaining.notifications.map(note => note.conversation), ['正在更新的对话', '新对话']);
   assert(remaining.approvals.some(approval => approval.id === approvalToClear.id));
@@ -207,6 +208,12 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   assert.equal(menuTest.canSendTest, true);
   assert.equal(menuTest.unread, 1);
   assert.deepEqual(menuTest.notifications.map(note => note.title), ['Test notification']);
+  const id = menuTest.notifications[0].id;
+  for (const sock of sockets) sock.write(JSON.stringify({ t: 'dismiss', ids: [id] }) + '\n');
+  await until(() => received.some(message => message.t === 'dismiss' && message.ids.includes(id)));
+  const dismissed = await inbox();
+  assert.equal(dismissed.unread, 0);
+  assert.deepEqual(dismissed.notifications, []);
 
   proxy.stdin.end();
 });

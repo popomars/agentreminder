@@ -120,25 +120,58 @@ function attach(hub, name) {
   const messages = [];
   const link = new Link('usb', name, line => messages.push(JSON.parse(line)), () => {}, hub);
   hub.add(link);
-  hub.onMessage(link, { t:'hello', app:'agentreminder', id:name, interaction:true });
+  hub.onMessage(link, { t:'hello', app:'agentreminder', id:name, interaction:true, notificationDismissals:true });
   const last = type => messages.findLast(m => m.t === type);
-  return { messages, link, last, decide: decision => hub.onMessage(link, { t:'decision', id:last('approval').id, decision }) };
+  return { messages, link, last,
+    decide: decision => hub.onMessage(link, { t:'decision', id:last('approval').id, decision }),
+    dismiss: ids => hub.onMessage(link, { t:'dismiss', ids }) };
 }
 
-async function until(check) {
-  for (let i = 0; i < 120; i++) {
+async function until(check, attempts = 120) {
+  for (let i = 0; i < attempts; i++) {
     if (check()) return;
     await sleep(10);
   }
   assert.fail('Timed out waiting for the mirrored card');
 }
 
+test('a Tailnet peer that missed a dismissal receives it after reconnecting', { timeout: 15000 }, async t => {
+  const offline = http.createServer((_, res) => res.writeHead(503).end('{}'));
+  const reserve = http.createServer();
+  await Promise.all([once(offline.listen(0, listen), 'listening'), once(reserve.listen(0, listen), 'listening')]);
+  t.after(() => offline.close());
+  const originPort = reserve.address().port;
+  const peerPort = offline.address().port;
+  await new Promise(resolve => reserve.close(resolve));
+  const hub = new Hub({}, ids => origin.broadcastDismissals(ids));
+  const peerHub = new Hub({});
+  const origin = createMesh({ listen, port: originPort, key, peers: [{ address: listen, port: peerPort }] }, hub, () => {});
+  const peer = createMesh({ listen, port: peerPort, key, peers: [{ address: listen, port: originPort }] }, peerHub, () => {});
+  t.after(() => Promise.all([origin.close(), peer.close()]));
+  await once(origin.start(), 'listening');
+  const user = attach(hub, 'dismissal-source');
+  const device = attach(peerHub, 'reconnecting-device');
+  t.after(() => { user.link.close(); device.link.close(); });
+  const info = { kind: 'done', title: 'Earlier notification' };
+  const card = hub.notificationCard(info);
+  hub.notify(info, card);
+  peerHub.notify(info, card);
+  const attempted = once(offline, 'request');
+  user.dismiss([card.id]);
+  await attempted;
+  assert(peerHub.notifications.has(card.id));
+  await new Promise(resolve => offline.close(resolve));
+  await once(peer.start(), 'listening');
+  await until(() => device.last('dismiss')?.ids.includes(card.id), 1200);
+  assert(!peerHub.notifications.has(card.id));
+});
+
 test('three identical meshes share cards, accept one decision, and clear mirrors when the origin disappears', { timeout:10000 }, async t => {
   const sockets = Array.from({ length:3 }, () => http.createServer());
   await Promise.all(sockets.map(socket => once(socket.listen(0, listen), 'listening')));
   const ports = sockets.map(socket => socket.address().port);
   await Promise.all(sockets.map(socket => new Promise(resolve => socket.close(resolve))));
-  const hubs = ports.map(() => new Hub({}));
+  const hubs = ports.map((_, i) => new Hub({}, ids => meshes[i].broadcastDismissals(ids)));
   const [a, b, c] = hubs.map(hub => attach(hub, 'physical-device'));
   t.after(() => [a, b, c].forEach(d => d.link.close()));
   const meshes = ports.map((port, i) => createMesh({
@@ -157,6 +190,15 @@ test('three identical meshes share cards, accept one decision, and clear mirrors
   assert.deepEqual(a.last('notify'), b.last('notify'));
   assert.deepEqual(b.last('notify'), c.last('notify'));
   for (const device of [a, b, c]) assert.equal(device.messages.filter(m => m.t === 'notify').length, 1);
+  const note = b.last('notify');
+  b.dismiss([note.id]);
+  await until(() => [a, b, c].every(device => device.last('dismiss')?.ids.includes(note.id)));
+  assert(hubs.every(hub => !hub.notifications.has(note.id)));
+  assert.equal(await meshes[0].notify({ ...info, kind:'done' }), 3);
+  const replacement = a.last('notify');
+  assert.notEqual(replacement.id, note.id);
+  b.dismiss([note.id]);
+  assert(hubs.every(hub => hub.notifications.get(replacement.id)?.unread === true));
 
   const approval = meshes[0].approval(info, 3000, new EventEmitter());
   await until(() => b.last('approval') && c.last('approval'));

@@ -20,6 +20,7 @@ The host ignores any line that is not JSON, such as boot logs. A link only count
 | `resolved` | `id, decision, by` | Approval settled (here or on another channel). Remove the card. |
 | `cancel` | `id, why` | Agent side cancelled (hook process exited or timed out). Remove the card. |
 | `notify` | `id, agent, host, project, sessionId, conversation, kind(done/input/idle/info), title, detail, ts, receivedTime?, sequence?` | Notification |
+| `dismiss` | `ids` | Dismisses the listed notification UUIDs. Supported hosts and boards advertise `notificationDismissals: true` in `hello`. The host acknowledges a device dismissal with the same frame. |
 | `ble-pair` | `id, conversation, key` | USB-only setup. Device shows its pairing approval. On allow it saves the new 32-byte hex key in NVS before replying `decision` with `ble_paired:true`. |
 | `wifi` | `ssid, pass` | Write the Wi-Fi config to NVS and reconnect |
 
@@ -46,9 +47,10 @@ Each frame starts with a two-byte big-endian payload length. The host and device
 - `GET /inbox` → local menu bar view with unread count, recent notifications, active non-pairing approvals and the number of connected devices. The in-memory inbox keeps the latest notification per host, project and conversation, up to 100 groups. Each row includes its receipt time. The inbox requires a loopback Host header.
 - `POST /inbox/test {lang: "zh"|"en"}` → delivers a sample card to the local menu and its connected devices. Uses the loopback inbox guard and omits Tailnet fan-out.
 - `POST /inbox/read {ids: [...]}` → marks the listed notifications read. Reads do not settle approvals or affect boards.
-- `POST /inbox/clear {notifications: [...], approvals: [...]}` → removes the listed local notifications and hands the listed pending approvals back to their originating clients. The app sends the IDs it displayed, so cards arriving after that snapshot stay in the inbox.
+- `POST /inbox/clear {notifications: [...], approvals: [...]}` → dismisses the listed notifications across connected devices and Tailnet peers and hands the listed pending approvals back to their originating clients. The app sends the IDs it displayed, so cards arriving after that snapshot stay in the inbox.
 - `POST /agent-integrations {agent:"codex"|"claude"|"dsh"|"workbuddy", enabled}` → changes forwarding for one local agent. Enabling installs its managed hooks when missing and returns `installedHooks: true` in that case. Disabling preserves hook files and leaves pending requests intact. The Codex switch applies to terminal hooks and the desktop proxy manages approvals independently. Uses the owner-only menu setup token.
 - `POST /tailnet/setup {mode:"create"|"join", key?}` → initializes the mesh in the running daemon. Requires a loopback request and a setup token from the owner's mode-0600 local state file. The service generates a key in create mode or validates the pasted key in join mode. Responses and status endpoints omit the shared key.
+- `POST /sleep-prevention {enabled: true|false}` → persists and applies macOS idle-sleep prevention. Requires a loopback request and the owner-only setup token. The `sleepPrevention` status reports support, preference, and whether the assertion helper is running.
 - `POST /firmware/prepare {}` → releases the USB connections while the local flasher holds the update lock. The service refuses to start an update while approvals or pairing are pending. USB scanning resumes when the flasher exits.
 - `POST /pair {}` → asks one connected USB device for confirmation, preferring an unpaired device when there is exactly one. On macOS, compatible firmware stores a Bluetooth enrollment key after confirmation. The daemon retains earlier board enrollments. Ordinary cards and decisions are restricted to registered USB devices and their authenticated Bluetooth links once at least one device is paired. The daemon broadcasts the first resolution to every ready link.
 - `GET /status`, `POST /raw` (broadcast as-is), `POST /shutdown`
@@ -105,5 +107,11 @@ the existing card to its local device without forwarding it further. The
 origin assigns the card ID and timestamp once. Approval HTTP requests remain
 open for the local device decision. The origin accepts one valid outcome,
 closes the other requests, and clears its own card. A closed origin connection
-cancels incoming peer cards. Unreachable peers are skipped and events are not
-queued for offline peers.
+cancels incoming peer cards. Unreachable peers are skipped and new cards are
+not queued for offline peers.
+
+An authenticated `{card: {t: "dismiss", ids: [...]}, timeoutMs: 0}` clears
+matching notifications from the receiver's inbox and devices. The initiating
+daemon retries its latest 100 dismissal IDs while it runs. Connected devices
+and peers discard late deliveries for recently dismissed IDs. A board retries
+its unacknowledged dismissals when it reconnects.

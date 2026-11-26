@@ -127,6 +127,11 @@ daemon activates the mesh in place and retains its inbox and pending
 approvals. Group keys stay in private local configuration and can be
 copied during initialization or from the key dialog.
 
+Notification dismissals carry only card UUIDs. The host clears those IDs
+locally and sends them directly to authenticated Tailnet peers. The initiating
+host keeps a bounded retry history, so clearing one card leaves its newer
+conversation replacement visible.
+
 ### ADR-0008: Show AgentReminder in the macOS menu bar
 
 - Date: 2026-11-26
@@ -147,11 +152,19 @@ dsh and WorkBuddy hooks. Hook switches gate local forwarding at runtime and
 preserve existing third-party settings. Codex applies its configuration the
 next time ChatGPT opens. Codex CLI has its own row. The menu confirms that
 hooks were installed and Codex handles trust review through `/hooks`.
-The local service remembers custom CLI configuration directories selected at install.
+The local service remembers custom CLI configuration directories and the Claude
+executable found at install, since login services may lack the shell's PATH.
+The menu locates Codex Desktop through running apps and Launch Services, with
+an explicit bundle selection when needed. Login restores the enabled bridge
+using the current bundle location.
 The daemon owns unread counts and retains the latest notification in each
 host, project, and conversation group, up to 100 groups. The app shows the
 latest notification and its reception time. The app uses the existing USB pairing endpoint and the
 same device confirmation as the command-line flow.
+
+The idle-sleep setting is opt-in. The macOS daemon holds an idle system sleep
+assertion through the system `caffeinate` utility. The utility watches the
+daemon's PID so it releases the assertion on daemon exit, including crashes.
 
 The AgentReminder login item also restores opt-in Codex Dock configuration.
 Launch migrates the older AgentReminder-owned Codex LaunchAgent, which

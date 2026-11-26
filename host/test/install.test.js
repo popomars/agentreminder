@@ -8,6 +8,7 @@ const http = require('node:http');
 const os = require('node:os');
 const path = require('node:path');
 const { execFile, spawn } = require('node:child_process');
+const { once } = require('node:events');
 const { promisify } = require('node:util');
 
 const run = promisify(execFile);
@@ -43,6 +44,52 @@ function partitionTable(entries) {
   createHash('md5').update(table.subarray(0, offset)).digest().copy(table, offset + 16);
   return table;
 }
+
+test('idle sleep prevention is opt-in, local, and restored when the daemon restarts', { skip: process.platform !== 'darwin', timeout: 10000 }, async t => {
+  const { state, env } = fixture(t);
+  const reserve = http.createServer();
+  const port = await listen(reserve);
+  await new Promise(resolve => reserve.close(resolve));
+  const configFile = path.join(state, 'config.json');
+  const initial = { httpPort: port, usb: { enabled: false }, bluetooth: { enabled: false }, unrelated: 'keep' };
+  fs.writeFileSync(configFile, JSON.stringify(initial));
+  const host = path.join(root, 'host/agentreminder.js');
+  let child;
+  t.after(() => child?.kill());
+  const request = (route, options) => fetch(`http://127.0.0.1:${port}${route}`,
+    { signal: AbortSignal.timeout(1000), ...options });
+  const get = async route => (await request(route)).json();
+  const started = async active => {
+    child = spawn(process.execPath, [host, 'daemon'], { env, stdio: 'ignore' });
+    for (let i = 0; i < 60; i++) {
+      const inbox = await get('/inbox').catch(() => null);
+      if (inbox?.canManageSleepPrevention && inbox.sleepPrevention.active === active) return inbox;
+      await new Promise(resolve => setTimeout(resolve, 50));
+    }
+    assert.fail('Daemon did not report the expected idle-sleep state');
+  };
+  const toggle = (enabled, headers = {}) => request('/sleep-prevention', {
+    method: 'POST', headers: { 'content-type': 'application/json', ...headers },
+    body: JSON.stringify({ enabled }),
+  });
+  const authorized = () => ({ 'x-agentreminder-setup': fs.readFileSync(path.join(state, 'menu-setup.token'), 'utf8').trim() });
+
+  assert.deepEqual((await started(false)).sleepPrevention, { supported: true, enabled: false, active: false });
+  assert.equal((await toggle(true)).status, 403);
+  assert.equal((await toggle(true, { ...authorized(), Origin: 'https://example.test' })).status, 403);
+  assert.equal((await toggle('true', authorized())).status, 400);
+  assert.deepEqual(await (await toggle(true, authorized())).json(), { ok: true });
+  assert.deepEqual((await get('/status')).sleepPrevention, { supported: true, enabled: true, active: true });
+  assert.deepEqual(JSON.parse(fs.readFileSync(configFile, 'utf8')), { ...initial, preventIdleSleep: true });
+
+  const stopped = once(child, 'exit');
+  child.kill();
+  await stopped;
+  assert.deepEqual((await started(true)).sleepPrevention, { supported: true, enabled: true, active: true });
+  assert.deepEqual(await (await toggle(false, authorized())).json(), { ok: true });
+  assert.deepEqual((await get('/status')).sleepPrevention, { supported: true, enabled: false, active: false });
+  assert.deepEqual(JSON.parse(fs.readFileSync(configFile, 'utf8')), { ...initial, preventIdleSleep: false });
+});
 
 test('Passport installer writes only the compatible factory application and uninstalls its files', { timeout: 15000 }, async t => {
   const { home, state, env } = fixture(t);
@@ -229,10 +276,10 @@ test('installing the runtime without hooks preserves the existing hook files', a
   assert(!fs.existsSync(path.join(state, 'dsh-hooks.json')));
 });
 
-test('installer detects user-local CLI binaries and remembers their custom settings directories', async t => {
+test('installer detects CLI binaries on custom paths and remembers their settings directories and Claude executable', async t => {
   const { home, state, codex, env } = fixture(t);
   const bin = path.join(home, '.local/bin');
-  const tools = path.join(home, 'tools');
+  const tools = path.join(home, 'tools with spaces');
   const claude = path.join(home, 'claude custom');
   fs.mkdirSync(bin, { recursive: true });
   fs.mkdirSync(tools);
@@ -240,7 +287,8 @@ test('installer detects user-local CLI binaries and remembers their custom setti
   env.CLAUDE_CONFIG_DIR = claude;
   fs.symlinkSync(process.execPath, path.join(tools, 'node'));
   fs.writeFileSync(path.join(bin, 'codex'), '#!/bin/sh\nexit 1\n', { mode: 0o700 });
-  fs.writeFileSync(path.join(bin, 'claude'), '#!/bin/sh\nprintf "2.1.76 (Claude Code)\\n"\n', { mode: 0o700 });
+  const claudeExecutable = path.join(tools, 'claude');
+  fs.writeFileSync(claudeExecutable, '#!/bin/sh\nprintf "2.1.76 (Claude Code)\\n"\n', { mode: 0o700 });
   const { stdout, stderr } = await run('bash', ['install.sh', '--no-menu-bar', '--no-pair', '--lang', 'en'],
     { cwd: root, env });
   assert.match(stderr, /terminal command could not start/);
@@ -250,7 +298,8 @@ test('installer detects user-local CLI binaries and remembers their custom setti
   assert(JSON.parse(fs.readFileSync(path.join(claude, 'settings.json'))).hooks.Elicitation);
   const config = JSON.parse(fs.readFileSync(path.join(state, 'config.json')));
   assert.deepEqual(config.agentConfigDirs, { codex, claude });
-  const loginEnv = { ...env };
+  assert.equal(config.claudeExecutable, claudeExecutable);
+  const loginEnv = { ...env, PATH: '/usr/bin:/bin' };
   delete loginEnv.CODEX_HOME;
   delete loginEnv.CLAUDE_CONFIG_DIR;
   const host = path.join(state, 'app/host/agentreminder.js');
@@ -258,6 +307,20 @@ test('installer detects user-local CLI binaries and remembers their custom setti
     'const { codex, claude } = require(process.argv[1]).hookSettings; console.log(JSON.stringify({ codex, claude }));', host],
     { env: loginEnv });
   assert.deepEqual(JSON.parse(resolved), { codex: path.join(codex, 'hooks.json'), claude: path.join(claude, 'settings.json') });
+});
+
+test('installer honors a new custom config directory before the CLI is on PATH', async t => {
+  const { state, home, env } = fixture(t);
+  const claude = path.join(home, 'new Claude configuration');
+  const tools = path.join(home, 'tools');
+  fs.mkdirSync(tools);
+  fs.symlinkSync(process.execPath, path.join(tools, 'node'));
+  env.PATH = tools + ':/usr/bin:/bin';
+  env.CLAUDE_CONFIG_DIR = claude;
+  await run('bash', ['install.sh', '--no-menu-bar', '--no-pair'], { cwd: root, env });
+  assert(JSON.parse(fs.readFileSync(path.join(claude, 'settings.json'))).hooks.Stop);
+  assert.equal(JSON.parse(fs.readFileSync(path.join(state, 'config.json'))).agentConfigDirs.claude, claude);
+  assert(!fs.existsSync(path.join(home, '.claude')));
 });
 
 
@@ -359,16 +422,22 @@ test('Codex CLI and other hook agents can be configured and paused independently
   const port = await listen(portServer);
   await new Promise(resolve => portServer.close(resolve));
   const configFile = path.join(state, 'config.json');
+  const claudeDir = path.join(home, 'custom Claude config');
+  const claudeExecutable = path.join(home, 'private bin/claude');
+  fs.mkdirSync(path.dirname(claudeExecutable));
+  fs.writeFileSync(claudeExecutable, '#!/bin/sh\nprintf "2.1.76 (Claude Code)\\n"\n', { mode: 0o700 });
   fs.writeFileSync(configFile, JSON.stringify({
     httpPort: port, usb: { enabled: false }, bluetooth: { enabled: false }, unrelated: 'keep',
+    agentConfigDirs: { claude: claudeDir }, claudeExecutable,
   }));
-  const claudeDir = path.join(home, '.claude');
   fs.mkdirSync(claudeDir);
   const claudeFile = path.join(claudeDir, 'settings.json');
   const unrelated = { type: 'command', command: 'echo keep-existing-hook' };
   fs.writeFileSync(claudeFile, JSON.stringify({ hooks: { Stop: [{ hooks: [unrelated] }] } }));
   const host = path.join(root, 'host/agentreminder.js');
-  const daemon = spawn(process.execPath, [host, 'daemon'], { env, stdio: 'ignore' });
+  const daemonEnv = { ...env, PATH: '/usr/bin:/bin' };
+  delete daemonEnv.CLAUDE_CONFIG_DIR;
+  const daemon = spawn(process.execPath, [host, 'daemon'], { env: daemonEnv, stdio: 'ignore' });
   t.after(() => daemon.kill());
   const address = `http://127.0.0.1:${port}`;
   const get = route => fetch(address + route).then(response => response.json());
@@ -394,6 +463,8 @@ test('Codex CLI and other hook agents can be configured and paused independently
   assert.deepEqual(await (await toggle('workbuddy', true)).json(), { status: 'enabled', installedHooks: true });
   const hooks = JSON.parse(fs.readFileSync(claudeFile, 'utf8')).hooks;
   assert(hooks.Stop.some(group => group.hooks.some(hook => hook.command === unrelated.command)));
+  assert(hooks.Elicitation);
+  assert(!fs.existsSync(path.join(home, '.claude')));
   const claudeBytes = fs.readFileSync(claudeFile, 'utf8');
   const dshFile = path.join(state, 'dsh-hooks.json');
   const dshBytes = fs.readFileSync(dshFile, 'utf8');

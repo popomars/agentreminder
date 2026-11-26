@@ -26,7 +26,7 @@ const bluetooth = require('./bluetooth');
 const tailnet = require('./tailnet');
 const workbuddy = require('./workbuddy');
 
-const VERSION = '0.5.10';
+const VERSION = '0.5.11';
 const UNKNOWN_CONVERSATION = '未命名对话';
 const HOME_DIR = process.env.AGENTREMINDER_HOME || path.join(os.homedir(), '.agentreminder');
 const CONFIG_PATH = path.join(HOME_DIR, 'config.json');
@@ -39,6 +39,7 @@ const INBOX_HANDOFF_PATH = path.join(HOME_DIR, 'inbox-upgrade.json');
 const DEFAULT_CONFIG = {
   httpPort: 47321,              // daemon <-> hook (127.0.0.1 only)
   approvalTimeoutSec: 300,      // after this the agent falls back to its own prompt
+  preventIdleSleep: false,
   usb: { enabled: true, patterns: ['^cu\\.usbmodem', '^ttyACM'] },
   bluetooth: { enabled: true },
   wifi: { enabled: false, hosts: ['agentreminder.local'], port: 47322 },
@@ -149,12 +150,14 @@ class Link {
 }
 
 class Hub {
-  constructor(cfg) {
+  constructor(cfg, relayDismissals = () => {}) {
     this.cfg = cfg;
     this.links = new Set();
     this.pending = new Map();   // id -> { payload, resolve, timer }
     this.notificationSequence = 0;
     this.notifications = new Map();
+    this.dismissedNotifications = new Set();
+    this.relayDismissals = relayDismissals;
   }
   connectedLinks() { return [...this.links].filter(l => l.ready); }
   pairings() { return registeredDevices(this.cfg); }
@@ -173,7 +176,7 @@ class Hub {
   add(link) {
     this.links.add(link);
     log('link open', link.kind, link.name);
-    const hello = { t: 'hello', host: hostName, v: VERSION };
+    const hello = { t: 'hello', host: hostName, v: VERSION, notificationDismissals: true };
     link.helloRetry = setInterval(() => link.send(hello), 500);
     // A port that never answers hello is not our device.
     link.helloTimer = setTimeout(() => { if (!link.ready) { log('no hello from', link.name); link.close(); } }, 6000);
@@ -200,6 +203,9 @@ class Hub {
         clearInterval(link.helloRetry);
         log('device ready', link.kind, link.name, msg);
         if (this.readyLinks().includes(link)) {
+          if (msg.notificationDismissals === true && this.dismissedNotifications.size) {
+            link.send({ t: 'dismiss', ids: [...this.dismissedNotifications] });
+          }
           for (const p of this.pending.values()) {
             if (!p.target && this.requestLinks(p.payload).includes(link)) {
               link.send({ ...p.payload, timeout: Math.max(1, Math.ceil((p.deadline - Date.now()) / 1000)) });
@@ -215,6 +221,9 @@ class Hub {
           this.resolve(msg.id, msg.decision, `${link.kind}:${link.name}`, msg.ble_paired === true);
         break;
       }
+      case 'dismiss':
+        if (this.readyLinks().includes(link)) this.dismissNotifications(msg.ids, { source: link });
+        break;
       case 'pong': case 'ack': break;
       case 'log': log('device:', msg.msg); break;
       default: log('unknown msg', msg);
@@ -276,7 +285,7 @@ class Hub {
       sequence: ++this.notificationSequence };
   }
   storeNotification(note) {
-    if (this.notifications.has(note.id)) return;
+    if (this.dismissedNotifications.has(note.id) || this.notifications.has(note.id)) return;
     const matching = [...this.notifications.values()].filter(candidate => {
       if (candidate.host !== note.host || candidate.project !== note.project) return false;
       if (candidate.sessionId && note.sessionId) return candidate.sessionId === note.sessionId;
@@ -294,6 +303,7 @@ class Hub {
     if (this.notifications.size > 100) this.notifications.delete(this.notifications.keys().next().value);
   }
   notify(info, payload = this.notificationCard(info)) {
+    if (this.dismissedNotifications.has(payload.id)) return 0;
     const { ts, sequence } = payload;
     const sessionId = typeof payload.sessionId === 'string' ? payload.sessionId || undefined : undefined;
     this.storeNotification({ ...inboxCard(payload), sessionId, ts, sequence, unread: true });
@@ -305,6 +315,23 @@ class Hub {
     }
     log('notify ->', info.agent, info.kind, info.kind === 'input' ? 'awaiting input' : info.title);
     return links.length;
+  }
+
+  dismissNotifications(ids, { source, relay = true } = {}) {
+    const accepted = tailnet.notificationIds(ids);
+    const added = accepted.filter(id => !this.dismissedNotifications.has(id));
+    for (const id of added) {
+      this.notifications.delete(id);
+      this.dismissedNotifications.add(id);
+      if (this.dismissedNotifications.size > tailnet.DISMISSAL_LIMIT) {
+        this.dismissedNotifications.delete(this.dismissedNotifications.values().next().value);
+      }
+    }
+    for (const link of this.readyLinks()) {
+      const dismissals = link === source ? accepted : added;
+      if (link.info.notificationDismissals === true && dismissals.length) link.send({ t: 'dismiss', ids: dismissals });
+    }
+    if (relay && added.length) this.relayDismissals(added);
   }
 }
 
@@ -456,14 +483,52 @@ function savePairingConfig(usb, device) {
   return config;
 }
 
+function createSleepPrevention() {
+  const supported = process.platform === 'darwin';
+  let enabled = false;
+  let holder;
+
+  function ensureActive() {
+    if (!enabled || holder) return;
+    // Tie the assertion to the daemon even if it exits without running cleanup.
+    const candidate = spawn('/usr/bin/caffeinate', ['-i', '-w', String(process.pid)], { stdio: 'ignore' });
+    holder = candidate;
+    candidate.unref();
+    const stopped = reason => {
+      if (holder !== candidate) return;
+      holder = undefined;
+      if (!enabled) return;
+      if (candidate.killed) ensureActive();  // The switch was turned back on before the old helper exited.
+      else log('sleep prevention stopped', reason);
+    };
+    candidate.once('error', error => stopped(error.code || error.message));
+    candidate.once('exit', (code, signal) => stopped(signal || code));
+  }
+
+  return {
+    supported,
+    status: () => ({
+      supported, enabled,
+      active: Boolean(holder?.pid && !holder.killed && holder.exitCode === null && holder.signalCode === null),
+    }),
+    ensureActive,
+    setEnabled(value) {
+      enabled = supported && value === true;
+      if (enabled) ensureActive();
+      else if (holder && !holder.killed) holder.kill();
+    },
+  };
+}
+
 function runDaemon() {
   if (firmwareUpdateActive()) throw new Error("A firmware update is already in progress.");
   ensureHome();
   const cfg = loadConfig();
-  const hub = new Hub(cfg);
   let mesh, meshConfigError, setupToken;
+  const hub = new Hub(cfg, ids => mesh?.broadcastDismissals(ids));
   const notify = async info => mesh ? await mesh.notify(info) : hub.notify(info);
   const workbuddyApprovals = workbuddy.createApprovalMonitor(path.join(WORKBUDDY_DIR, 'audit-log'), notify, log);
+  const sleepPrevention = createSleepPrevention();
   const authorizedSetup = req => {
     const token = req.headers['x-agentreminder-setup'];
     return setupToken && typeof token === 'string' && /^[0-9a-f]{64}$/.test(token) &&
@@ -516,7 +581,7 @@ function runDaemon() {
     const reply = (code, obj) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)); };
     try {
       if (req.headers.origin) return reply(403, { error: 'browser requests are not supported' });
-      if (req.url === '/inbox' || req.url === '/inbox/read' || req.url === '/inbox/clear' || req.url === '/inbox/test' || req.url === '/firmware/prepare' || req.url === '/tailnet/setup' || req.url === '/agent-integrations') {
+      if (req.url === '/inbox' || req.url === '/inbox/read' || req.url === '/inbox/clear' || req.url === '/inbox/test' || req.url === '/firmware/prepare' || req.url === '/tailnet/setup' || req.url === '/agent-integrations' || req.url === '/sleep-prevention') {
         if (!/^(127\.0\.0\.1|localhost)(:\d+)?$/i.test(req.headers.host || '')) {
           return reply(403, { error: 'endpoint requires a loopback host' });
         }
@@ -533,6 +598,8 @@ function runDaemon() {
           canClear: true, canUpdateFirmware: true, canSendTest: true, groupsNotifications: true,
           canInitializeTailnet: !!setupToken, tailnetConfigured: !!mesh, tailnetListening: mesh?.status().listening ?? false,
           canManageIntegrations: !!setupToken,
+          canManageSleepPrevention: !!setupToken && sleepPrevention.supported,
+          sleepPrevention: sleepPrevention.status(),
           agentIntegrations: Object.fromEntries(INTEGRATION_AGENTS.map(agent => [agent, integrationStatus(cfg, agent)])),
           notifications, unread: notifications.filter(note => note.unread).length,
           approvals: [...approvals.values()].map(inboxCard),
@@ -544,6 +611,7 @@ function runDaemon() {
           version: VERSION, pid: process.pid, pairedDeviceId: pairedDeviceIds[0] ?? null, pairedDeviceIds,
           waitingForUsbPairing: !!(cfg.usb.autoPair && !pairedDeviceIds.length),
           bluetooth: ble.status(), bluetoothDevices: ble.states(),
+          sleepPrevention: sleepPrevention.status(),
           devices: hub.readyLinks().map(l => ({ kind: l.kind, name: l.name, info: l.info })),
           pending: [...new Map([
             ...[...hub.pending].map(([id, pending]) => [id, pending.payload]),
@@ -562,7 +630,7 @@ function runDaemon() {
         return reply(200, { ok: true });
       }
       if (req.url === '/inbox/clear') {
-        for (const id of Array.isArray(body?.notifications) ? body.notifications : []) hub.notifications.delete(id);
+        hub.dismissNotifications(body?.notifications);
         for (const id of Array.isArray(body?.approvals) ? body.approvals : []) {
           const outgoing = mesh?.outgoing.get(id);
           if (outgoing) outgoing.handoff();
@@ -610,6 +678,16 @@ function runDaemon() {
         cfg.agentIntegrations = agentIntegrations;
         if (agent === 'workbuddy') workbuddyApprovals.setEnabled(enabled);
         return reply(200, { status: integrationStatus(cfg, agent), ...(installedHooks ? { installedHooks } : {}) });
+      }
+      if (req.url === '/sleep-prevention') {
+        if (!authorizedSetup(req)) return reply(403, { error: 'unauthorized' });
+        if (!sleepPrevention.supported) return reply(409, { error: 'unsupported-platform' });
+        const enabled = body?.enabled;
+        if (typeof enabled !== 'boolean') return reply(400, { error: 'invalid-setting' });
+        const config = readSavedConfig();
+        writePrivateFile(CONFIG_PATH, JSON.stringify({ ...config, preventIdleSleep: enabled }, null, 2) + '\n');
+        sleepPrevention.setEnabled(enabled);
+        return reply(200, { ok: true });
       }
       if (req.url === '/firmware/prepare') {
         if (!firmwareUpdateActive()) return reply(409, { error: 'firmware-update-inactive' });
@@ -687,6 +765,7 @@ function runDaemon() {
     startWifi(hub, cfg);
     mesh?.start();
     workbuddyApprovals.setEnabled(integrationStatus(cfg, 'workbuddy') === 'enabled');
+    sleepPrevention.setEnabled(cfg.preventIdleSleep);
     setInterval(() => {
       const devices = hub.pairings();
       const upgrade = cfg.bluetooth.enabled && bluetooth.available() &&
@@ -697,12 +776,14 @@ function runDaemon() {
       }
     }, 1000).unref();
     setInterval(() => {
+      sleepPrevention.ensureActive();
       for (const link of hub.connectedLinks()) {
         if (Date.now() - link.lastSeen > 40000) link.close();
         else link.send({ t: 'ping', ts: Date.now() });
       }
     }, 15000).unref();
   });
+  process.once('exit', () => sleepPrevention.setEnabled(false));
   process.on('SIGTERM', () => process.exit(0));
 }
 
@@ -1120,9 +1201,22 @@ function integrationStatus(config, agent) {
   catch (_) { return 'unavailable'; }
 }
 
-function claudeElicitationSupported() {
+function claudeExecutableOnPath() {
+  for (const dir of (process.env.PATH || '').split(path.delimiter)) {
+    if (!path.isAbsolute(dir)) continue;
+    const candidate = path.join(dir, 'claude');
+    try {
+      if (!fs.statSync(candidate).isFile()) continue;
+      fs.accessSync(candidate, fs.constants.X_OK);
+      return candidate;
+    } catch (_) { /* try the next PATH entry */ }
+  }
+}
+
+function claudeElicitationSupported(executable) {
+  if (!executable) return false;
   try {
-    const output = execFileSync('claude', ['--version'], { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] });
+    const output = execFileSync(executable, ['--version'], { encoding: 'utf8', timeout: 2000, stdio: ['ignore', 'pipe', 'ignore'] });
     const version = output.match(/^(\d+)\.(\d+)\.(\d+)/);
     if (!version) return false;
     const [, major, minor, patch] = version.map(Number);
@@ -1130,7 +1224,7 @@ function claudeElicitationSupported() {
   } catch (_) { return false; }
 }
 
-function install(target, report = console.log) {
+function install(target, report = console.log, claudeExecutable) {
   const t = (cfg) => ({ type: 'command', command: cfg.cmd, timeout: cfg.timeout });
   const appr = loadConfig().approvalTimeoutSec + 30;
   if (target === 'codex') {
@@ -1149,7 +1243,10 @@ function install(target, report = console.log) {
     }, target);
     report(`已写入 ${f}\n把 integrations/dsh/cordis.patch.yml 里的 configPath 指向它（见 README）。`);
   } else if (target === 'claude') {
-    const elicitation = claudeElicitationSupported();
+    const savedExecutable = loadConfig().claudeExecutable;
+    const executable = claudeExecutable || (typeof savedExecutable === 'string' && path.isAbsolute(savedExecutable)
+      && fs.existsSync(savedExecutable) ? savedExecutable : claudeExecutableOnPath());
+    const elicitation = claudeElicitationSupported(executable);
     const notifications = 'idle_prompt|agent_needs_input|auth_storage_failure|quota_auto_resume_disabled';
     const f = mergeHooks(hookSettings.claude, {
       PermissionRequest: [{ hooks: [t({ cmd: hookCmd('claude', 'permission'), timeout: appr })] }],
@@ -1217,16 +1314,17 @@ async function main() {
     }
     case 'install': {
       const agent = rest[0];
-      install(agent);
+      const claudeExecutable = agent === 'claude' ? claudeExecutableOnPath() : undefined;
+      install(agent, console.log, claudeExecutable);
       // Menu daemons launched at login do not inherit the installer's shell variables.
-      if (Object.hasOwn(AGENT_CONFIG_ENV, agent) && process.env[AGENT_CONFIG_ENV[agent]]) {
-        const directory = agentConfigDirectory(agent);
-        const settings = readSavedConfig();
-        if (settings.agentConfigDirs?.[agent] === directory) return;
-        settings.agentConfigDirs = { ...settings.agentConfigDirs, [agent]: directory };
-        ensureHome();
-        writePrivateFile(CONFIG_PATH, JSON.stringify(settings, null, 2) + '\n');
-      }
+      const directory = Object.hasOwn(AGENT_CONFIG_ENV, agent) && process.env[AGENT_CONFIG_ENV[agent]]
+        ? agentConfigDirectory(agent) : undefined;
+      if (!directory && !claudeExecutable) return;
+      const settings = readSavedConfig();
+      if (directory) settings.agentConfigDirs = { ...settings.agentConfigDirs, [agent]: directory };
+      if (claudeExecutable) settings.claudeExecutable = claudeExecutable;
+      ensureHome();
+      writePrivateFile(CONFIG_PATH, JSON.stringify(settings, null, 2) + '\n');
       return;
     }
     case 'log': process.stdout.write(fs.existsSync(LOG_PATH) ? fs.readFileSync(LOG_PATH, 'utf8').split('\n').slice(-60).join('\n') + '\n' : ''); return;

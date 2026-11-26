@@ -102,7 +102,16 @@ function restore() {
     const explicitlyDisabled = /^\s*"com\.agentreminder\.codex-dock"\s*=>\s*(disabled|true)\b/m.test(disabled.stdout);
     if (!explicitlyDisabled && (running() || currentOverride() === shim)) saveEnabled();
   }
-  if (hasShim && owned(enabledFile)) applyOverride();
+  if (hasShim && owned(enabledFile)) {
+    const override = currentOverride();
+    if ((!override || override === shim) && (process.env.AGENTREMINDER_CODEX_APP || process.env.AGENTREMINDER_CODEX_REAL_CLI)
+        && fs.existsSync(cli)) {
+      // Rebuild the shim if macOS found the app at a new location.
+      install();
+      return;
+    }
+    applyOverride();
+  }
   if (legacy) removeLegacyAgent(legacy);
 }
 
@@ -133,7 +142,7 @@ fi
 exec "$cli" "$@"
 `;
   try {
-    writePrivate(shim, shimBody, 0o700);
+    if (!shimExists || fs.readFileSync(shim, 'utf8') !== shimBody) writePrivate(shim, shimBody, 0o700);
     applyOverride();
     if (currentOverride() !== shim) throw new Error('CODEX_CLI_PATH 已有其他设置。');
     if (!enabled) saveEnabled();

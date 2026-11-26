@@ -37,7 +37,19 @@ curl -fsS -H 'Accept: application/vnd.github.raw+json' \
 
 ### 3. 接入你的 agent
 
-安装器会自动检测 Codex CLI、Claude Code CLI、dsh 和 WorkBuddy，并合并所需 hooks。Codex 默认使用 `~/.codex/hooks.json`，Claude Code 默认使用 `~/.claude/settings.json`。如果安装时设置了 `CODEX_HOME` 或 `CLAUDE_CONFIG_DIR`，菜单栏服务也会沿用该目录。新装 CLI 后可重新运行安装器，或在 **Agent 接入** 中启用对应项目。
+安装器会自动检测 Codex CLI、Claude Code CLI、dsh 和 WorkBuddy，并合并所需 hooks。CLI 装在自定义位置时，从能运行对应命令的终端执行安装。如果命令只在别名里可用，可以先把实际可执行文件所在目录加到 `PATH`，或用 `--agent codex`、`--agent claude`、`--agent dsh` 显式写入 hooks。安装器会记住找到的 Claude 可执行文件，菜单服务登录后也能用它检查版本。
+
+Codex CLI 默认使用 `~/.codex/hooks.json`，Claude Code 默认使用 `~/.claude/settings.json`。如果客户端使用自定义配置目录，按上面的 GitHub 下载步骤取得脚本，再把最后一行替换为下面的命令。菜单服务会记住这些目录。只改了一个客户端的目录，就只传相应变量。
+
+```bash
+CODEX_HOME="$HOME/自定义目录/codex" \
+CLAUDE_CONFIG_DIR="$HOME/自定义目录/claude" \
+bash agentreminder-install.sh --ref "$revision"
+```
+
+从仓库安装时，保留相同的环境变量，把最后一行改为 `bash install.sh`。后来才安装的 Agent 可以从 **Agent 接入** 启用。
+
+Codex 桌面端移到其他文件夹后，铃铛会从正在运行的应用和 macOS 注册的应用中查找。如果有多个副本或未找到，在 **Agent 接入 → Codex 双端审批（桌面端）→ 选择桌面应用…** 中选实际使用的 `.app`。WorkBuddy 搬动后，可先打开一次，再从 **Agent 接入** 启用。dsh 按表中的方法配置实际使用的 profile。
 
 | Agent | 安装后要做什么 |
 | --- | --- |
@@ -60,7 +72,7 @@ curl -fsS -H 'Accept: application/vnd.github.raw+json' \
 
 | 入口 | 功能 |
 | --- | --- |
-| **通知** | 按主机、项目、对话分组，每组保留最新一条，显示接收时间，例如 `11-26 12:09`。打开一组会标为已读，铃铛上的数字是未读组数。子菜单可以清除通知。 |
+| **通知** | 按主机、项目、对话分组，每组保留最新一条并显示接收时间。打开通知会标为已读，铃铛显示未读组数。在设备上清除一条通知，会把它从菜单栏和其他设备一并移除。子菜单的「清除所有通知」也会同步。 |
 | **待审批** | 查看待审批和等待回答的卡片；在设备或 agent 里提交决定。**清除所有审批和通知** 会清除菜单中的项目，并把待审批事项交回原客户端。 |
 | **配对新设备…** | 通过 USB 添加或重新配对设备。 |
 | **安装或更新固件…** | 选择板型，从安装包写入固件。写入时保持 USB 连接。已经配对的设备重启后会重连。 |
@@ -68,9 +80,14 @@ curl -fsS -H 'Accept: application/vnd.github.raw+json' \
 | **联机服务** | **初始化**生成并复制新组密钥，**加入联机服务**使用现有组密钥，**查看联机密钥**可查看或复制本机已保存的密钥。 |
 | **Agent 接入** | 查看 Codex CLI、Codex 桌面双端审批、Claude Code CLI、dsh 和 WorkBuddy 的状态并分别启停。Codex 桌面设置在重开 ChatGPT 后生效。 |
 | **登录时启动** | 在 macOS「登录项与扩展」中显示为 AgentReminder。它启动铃铛和后台服务，并恢复已启用的 Codex Dock 配置。 |
+| **阻止闲置睡眠** | 让后台服务在 Mac 锁屏或熄屏时保持系统唤醒。默认关闭，选择后会记住设置。 |
 | **检查更新…** | 检查 GitHub `main` 的版本。发现新版后可选择「安装更新」，完成后铃铛自动重开，保留配对、联机设置和 hooks。 |
 
 设备一次显示一张审批，默认等待 5 分钟。两个预设选项可以在设备上选择。多选项、文字输入和登录验证可回原对话完成。微雪短按 PWR、Passport 竖放时短按下键，可把问题交回电脑。
+
+同步清除需将各台主机升级到 0.5.11、微雪升级到 0.3.17、Passport 升级到 0.3.21 或更新版本。启用了 Tailnet 的电脑也会同步清除。
+
+关闭「阻止闲置睡眠」或停止后台服务会释放防睡眠状态。合盖、手动睡眠和低电量时仍遵循 macOS 的电源管理。无菜单栏的 Mac 可在 `~/.agentreminder/config.json` 中设置 `"preventIdleSleep": true`，再重启服务。
 
 刷机时只接一块板。微雪串口若未出现，按住 **BOOT/−** 接入 USB，再松开。Passport 首刷前先备份原固件，刷机脚本会检查原有分区表。首次刷机时脚本会按需安装 esptool。 [微雪刷机说明](https://docs.waveshare.com/ESP32-S3-Touch-AMOLED-2.16/Instructions-For-Use) · [Passport 备份和恢复](firmware/release/folotoy-ai-passport/README.md#安装与恢复)
 

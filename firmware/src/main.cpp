@@ -6,6 +6,8 @@
 #include <Preferences.h>
 #endif
 #include <ArduinoJson.h>
+#include <algorithm>
+#include <vector>
 #include "ui.h"
 #include "ble_transport.h"
 #include "notification_sound.h"
@@ -23,10 +25,10 @@ extern "C" esp_err_t __wrap_nvs_flash_init(void) {
 }
 
 static constexpr size_t usbRxBuffer = 4096;
-static constexpr char fwVersion[] = "0.3.20";
+static constexpr char fwVersion[] = "0.3.21";
 #else
 static constexpr size_t usbRxBuffer = 16384;
-static constexpr char fwVersion[] = "0.3.16";
+static constexpr char fwVersion[] = "0.3.17";
 static constexpr uint16_t tcpPort = 47322;
 static WiFiServer server(tcpPort);
 static WiFiClient client;
@@ -41,6 +43,8 @@ static String usbBuf;
 static String pairingId, pairingKey;
 static uint32_t pairingAt, lastUsbPacket;
 static bool usbActive;
+static uint8_t dismissalLinks;
+static std::vector<String> pendingDismissals;
 
 static String deviceId() {
   uint64_t mac = ESP.getEfuseMac();
@@ -58,6 +62,22 @@ static void sendOn(uint8_t ch, JsonDocument &doc) {
 }
 
 static void clearPairing() { pairingId = ""; pairingKey = ""; }
+
+static void sendDismissals(uint8_t channels) {
+  if (!channels || pendingDismissals.empty()) return;
+  JsonDocument message;
+  message["t"] = "dismiss";
+  auto ids = message["ids"].to<JsonArray>();
+  for (const auto &id : pendingDismissals) ids.add(id);
+  sendOn(channels, message);
+}
+
+void sendNotificationDismissal(const String &id) {
+  if (id.length() != 36) return;
+  if (pendingDismissals.size() == NOTIFICATION_DISMISSAL_LIMIT) pendingDismissals.erase(pendingDismissals.begin());
+  pendingDismissals.push_back(id);
+  sendDismissals(dismissalLinks);
+}
 
 void sendDecision(const Item &it, const char *decision) {
   JsonDocument d;
@@ -98,11 +118,14 @@ static void handle(const String &line, uint8_t ch) {
 
   if (!strcmp(t, "hello")) {
     ui_set_connected_host(ch, m["host"] | "");
+    if (m["notificationDismissals"] | false) dismissalLinks |= ch;
+    else dismissalLinks &= ~ch;
     JsonDocument r;
     r["t"] = "hello"; r["app"] = "agentreminder"; r["fw"] = fwVersion; r["id"] = deviceId();
     r["link"] = ch == CH_USB ? "usb" : ch == CH_BLE ? "ble" : "wifi";
     r["ble"] = 1; r["ble_paired"] = ble_paired();
     r["interaction"] = true;
+    r["notificationDismissals"] = true;
     r["font_ok"] = ui_font_ok();
     r["sound"] = notification_sound_enabled();
     r["orientation"] = ui_landscape() ? "landscape" : "portrait";
@@ -112,8 +135,18 @@ static void handle(const String &line, uint8_t ch) {
     if (WiFi.status() == WL_CONNECTED) r["ip"] = WiFi.localIP().toString();
 #endif
     sendOn(ch, r);
+    sendDismissals(dismissalLinks & ch);
   } else if (!strcmp(t, "ping")) {
     JsonDocument r; r["t"] = "pong"; r["ts"] = m["ts"]; sendOn(ch, r);
+  } else if (!strcmp(t, "dismiss")) {
+    const auto ids = m["ids"].as<JsonArrayConst>();
+    if (!(dismissalLinks & ch) || ids.size() > NOTIFICATION_DISMISSAL_LIMIT) return;
+    for (JsonVariantConst value : ids) {
+      const char *id = value | "";
+      if (strlen(id) != 36) continue;
+      ui_dismiss_notify(id);
+      pendingDismissals.erase(std::remove(pendingDismissals.begin(), pendingDismissals.end(), id), pendingDismissals.end());
+    }
   } else if (!strcmp(t, "approval") || !strcmp(t, "notify") || (!strcmp(t, "ble-pair") && ch == CH_USB)) {
     const bool pairing = !strcmp(t, "ble-pair");
     Item it;
@@ -183,7 +216,10 @@ void setup() {
   Serial.setRxBufferSize(usbRxBuffer);
   Serial.begin(115200);
   ui_init();
-  ble_init(deviceId(), [](const String &line) { handle(line, CH_BLE); }, [] { ui_remove_channel(CH_BLE); });
+  ble_init(deviceId(), [](const String &line) { handle(line, CH_BLE); }, [] {
+    dismissalLinks &= ~CH_BLE;
+    ui_remove_channel(CH_BLE);
+  });
 #ifndef AGENTREMINDER_PASSPORT
   startWifi();
 #endif
@@ -195,6 +231,7 @@ void loop() {
     usbActive = false;
     usbBuf = "";
     clearPairing();
+    dismissalLinks &= ~CH_USB;
     ui_remove_channel(CH_USB);
   }
   if (pairingId.length() && millis() - pairingAt >= 60000UL) clearPairing();
@@ -204,6 +241,7 @@ void loop() {
   const bool wifiUp = WiFi.status() == WL_CONNECTED;
   if (wifiActive && (!wifiUp || !client.connected() || millis() - lastWifiPacket > 40000UL)) {
     wifiActive = false;
+    dismissalLinks &= ~CH_WIFI;
     client.stop();
     tcpBuf = "";
     ui_remove_channel(CH_WIFI);
@@ -217,6 +255,7 @@ void loop() {
     WiFiClient nc = server.available();
     if (nc) {
       if (client) client.stop();
+      dismissalLinks &= ~CH_WIFI;
       if (wifiActive) ui_remove_channel(CH_WIFI);
       wifiActive = false;
       client = nc; client.setNoDelay(true); tcpBuf = "";
