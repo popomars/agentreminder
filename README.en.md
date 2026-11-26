@@ -37,7 +37,17 @@ To move a board to a new Mac, connect it by USB and pair from the bell on the ne
 
 ### 3. Connect your agent
 
-The installer detects Codex CLI, Claude Code CLI, dsh, and WorkBuddy and merges the required hooks. The default files are `~/.codex/hooks.json` and `~/.claude/settings.json`. If `CODEX_HOME` or `CLAUDE_CONFIG_DIR` is set during installation, the menu bar service uses that directory too. If you install a CLI later, rerun the installer or enable it under **Agent integrations**.
+The installer detects Codex CLI, Claude Code CLI, dsh, and WorkBuddy and merges the required hooks. For a CLI installed in a custom location, run the installer from a terminal that can run the command. If you use an alias, add the executable's directory to `PATH`, or use `--agent codex`, `--agent claude`, or `--agent dsh` to write the hooks explicitly. The installer remembers the Claude executable it finds so the menu bar service can check its version after login.
+
+Codex CLI defaults to `~/.codex/hooks.json` and Claude Code to `~/.claude/settings.json`. If either client uses a custom configuration directory, pass that same directory to the downloaded installer. The menu service remembers it. Set only the variable for each directory you customized.
+
+```bash
+CODEX_HOME="$HOME/custom settings/codex" \
+CLAUDE_CONFIG_DIR="$HOME/custom settings/claude" \
+bash ./install.sh
+```
+
+For a relocated Codex Desktop app, the bell looks through running apps and apps registered with macOS. If there are multiple copies or none is detected, use **Agent integrations → Codex Desktop approvals → Choose Desktop App…** and select the `.app` you use. After relocating WorkBuddy, open it once and enable its integration from the bell. Configure the dsh profile you actually use as shown below.
 
 | Agent | After installation |
 | --- | --- |
@@ -60,7 +70,7 @@ The installer detects Codex CLI, Claude Code CLI, dsh, and WorkBuddy and merges 
 
 | Item | What it does |
 | --- | --- |
-| **Notifications** | Keeps the latest notice per host, project, and conversation with its receipt time, for example `11-26 12:09`. Opening a group marks it read. The bell counts unread groups. Clear notifications from this submenu. |
+| **Notifications** | Keeps the latest notice per host, project, and conversation with its receipt time. Opening a notice marks it read, and the bell counts unread groups. Dismissing a notice on a board removes it from the bell and other boards. Clearing all notifications from this submenu also syncs. |
 | **Pending approvals** | Shows approvals and interactive questions. Answer from the agent or the device. **Clear all approvals and notifications** clears those menu entries and sends the pending decisions back to their originating clients. |
 | **Pair a new device…** | Adds or re-pairs a board over USB. |
 | **Install or update firmware…** | Installs the bundled firmware for the selected model. Keep USB connected while writing. Paired boards reconnect after restarting. |
@@ -68,9 +78,14 @@ The installer detects Codex CLI, Claude Code CLI, dsh, and WorkBuddy and merges 
 | **Tailnet service** | **Initialize** creates and copies a new group key. **Join Tailnet service** uses an existing group key. **View shared key** displays or copies the saved key. |
 | **Agent integrations** | Shows the status of Codex CLI, Codex Desktop approvals, Claude Code CLI, dsh, and WorkBuddy. Each integration can be enabled or disabled independently. Codex Desktop changes apply after reopening ChatGPT. |
 | **Launch at login** | Appears as AgentReminder in macOS Login Items & Extensions. It starts the bell and local service, and restores the Codex Dock configuration when enabled. |
+| **Prevent idle sleep** | Keeps the system awake while the service runs, including when the Mac is locked or the display turns off. It defaults to off and remembers your choice. |
 | **Check for updates…** | Checks GitHub `main` for a newer version. Choose **Install update** to install it and reopen the bell while retaining pairings, Tailnet settings, and hooks. |
 
 The board shows one approval at a time with a five-minute default deadline. For a question with two preset answers, use the indicated buttons. Return to the original conversation for extra choices, text input, or authentication. Press **PWR** briefly on Waveshare or the bottom function button on Passport in portrait orientation to hand a question back.
+
+Synced dismissal requires host 0.5.11, Waveshare firmware 0.3.17, and Passport firmware 0.3.21 or later. It also works across hosts with the Tailnet service enabled.
+
+Turning off **Prevent idle sleep** or stopping the host service releases the sleep assertion. macOS still manages lid closure, manual sleep, and low battery. On a headless Mac, set `"preventIdleSleep": true` in `~/.agentreminder/config.json` and restart the service.
 
 Connect only one board when flashing. When the Waveshare USB port is missing, hold **BOOT/−** while plugging in USB, then release it. Back up your Passport before its first flash. The flasher checks the existing partition layout and installs esptool when needed. [Waveshare flashing guide](https://docs.waveshare.com/ESP32-S3-Touch-AMOLED-2.16/Instructions-For-Use) · [Passport backup and recovery](firmware/release/folotoy-ai-passport/README.md#安装与恢复)
 

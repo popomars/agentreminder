@@ -10,9 +10,39 @@ function device(hub, name = 'test') {
   const messages = [];
   const link = new Link('usb', name, s => messages.push(JSON.parse(s)), () => {}, hub);
   hub.add(link);
-  link.feed(Buffer.from('{"t":"hello","app":"agentreminder"}\n'));
+  link.feed(Buffer.from('{"t":"hello","app":"agentreminder","notificationDismissals":true}\n'));
   return { link, messages };
 }
+
+test('device dismissal clears the exact UUID locally and suppresses late delivery', () => {
+  const relayed = [];
+  const hub = new Hub({}, ids => relayed.push(ids));
+  const a = device(hub);
+  const b = device(hub, 'second');
+  const info = { host: 'mac', project: 'repo', conversation: 'chat', sessionId: 'chat', kind: 'done' };
+  const older = hub.notificationCard(info);
+  const newer = hub.notificationCard(info);
+  hub.notify(info, older);
+  hub.notify(info, newer);
+  const dismiss = { t: 'dismiss', ids: [older.id] };
+  b.link.close();
+  const unknown = new Link('usb', 'unknown', () => {}, () => {}, hub);
+  hub.onMessage(unknown, dismiss);
+  assert.deepEqual(relayed, []);
+  hub.onMessage(a.link, dismiss);
+  hub.onMessage(a.link, dismiss); // retransmission is acknowledged without re-relaying
+  assert.deepEqual(a.messages.filter(m => m.t === 'dismiss'), [dismiss, dismiss]);
+  assert.deepEqual(relayed, [[older.id]]);
+  assert.deepEqual([...hub.notifications.keys()], [newer.id]);
+  assert.equal(hub.notify(info, older), 0);
+  const reconnected = device(hub, 'reconnected');
+  assert.deepEqual(reconnected.messages.at(-1), dismiss);
+  hub.onMessage(a.link, { t: 'dismiss', ids: [newer.id] });
+  assert.equal(hub.notifications.size, 0);
+  assert.deepEqual(reconnected.messages.at(-1), { t: 'dismiss', ids: [newer.id] });
+  a.link.close();
+  reconnected.link.close();
+});
 for (const decision of ['allow', 'deny', 'skip']) {
   test(`device ${decision} settles exactly one pending approval on both links`, async () => {
     const hub = new Hub({}); const a = device(hub); const b = device(hub, 'second');

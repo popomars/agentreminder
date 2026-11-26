@@ -12,6 +12,14 @@ const hex = /^[0-9a-f]{64}$/;
 const CARD_PATH = '/v1/card';
 const MAX_BODY = 64 * 1024;
 const uuid = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/;
+const DISMISSAL_LIMIT = 100;
+
+function notificationIds(ids) {
+  if (!Array.isArray(ids) || ids.length > DISMISSAL_LIMIT) return [];
+  return [...new Set(ids.filter(id => typeof id === 'string' && id.length === 36 && uuid.test(id)))];
+}
+
+const peerKey = peer => `${peer.address}:${peer.port}`;
 
 function isTailnetAddress(address) {
   if (!net.isIPv4(address)) return false;
@@ -85,6 +93,9 @@ function createMesh(config, hub, log, discover = discoverPeers) {
   let peers = config.peers || [];
   const outgoing = new Map();
   const challenges = new Map();
+  const localDismissals = new Set();
+  const peerDismissalVersions = new Map();
+  let dismissalVersion = 0, syncingDismissals = false, dismissalTimer;
   let listening = false, closed = false, refreshing = false, timer, discoveryError;
   const secret = Buffer.from(key, 'hex');
   const mac = (scope, from, to, data) => crypto.createHmac('sha256', secret)
@@ -124,7 +135,7 @@ function createMesh(config, hub, log, discover = discoverPeers) {
         'x-agentreminder-challenge': challenge, 'x-agentreminder-proof': mac('card', listen, peer.address, challenge + data),
       }, signal);
     } catch (error) {
-      if (!automatic && !signal.aborted) log('Tailnet peer unavailable', peer.address, error.code || error.message);
+      if (!automatic && !signal.aborted && card.t !== 'dismiss') log('Tailnet peer unavailable', peer.address, error.code || error.message);
       return {};
     }
   }
@@ -159,6 +170,11 @@ function createMesh(config, hub, log, discover = discoverPeers) {
       challenges.delete(challenge);
       const { card, timeoutMs } = JSON.parse(data);
       if (res.destroyed) return;
+      if (card?.t === 'dismiss') {
+        if (!notificationIds(card.ids).length) return reply(400, {});
+        hub.dismissNotifications(card.ids, { relay: false });
+        return reply(200, { ok: true });
+      }
       if (!card || !uuid.test(card.id) || !['approval', 'notify'].includes(card.t) ||
           typeof card.host !== 'string' || typeof card.receivedTime !== 'string' ||
           !Number.isSafeInteger(card.ts)) return reply(400, {});
@@ -193,16 +209,41 @@ function createMesh(config, hub, log, discover = discoverPeers) {
       if (closed) return;
       listen = next.listen;
       peers = next.peers.map(address => ({ address, port }));
+      const discovered = new Set(peers.map(peerKey));
+      for (const id of peerDismissalVersions.keys()) {
+        if (!discovered.has(id)) peerDismissalVersions.delete(id);
+      }
       discoveryError = undefined;
       if (listen && !server.listening) server.listen(port, listen);
+      else if (listen) void syncDismissals();
     } catch (error) {
       if (error.message !== discoveryError) log('Tailnet discovery error', error.message);
       discoveryError = error.message;
     } finally { refreshing = false; }
   }
 
+  async function syncDismissals() {
+    if (closed || !listening || syncingDismissals || !localDismissals.size) return;
+    const version = dismissalVersion;
+    const targets = peers.filter(peer => peerDismissalVersions.get(peerKey(peer)) !== version);
+    if (!targets.length) return;
+    syncingDismissals = true;
+    const card = { t: 'dismiss', ids: [...localDismissals] };
+    try {
+      await Promise.all(targets.map(async peer => {
+        const result = await post(peer, card, 0, AbortSignal.timeout(2000));
+        if (result.ok === true) peerDismissalVersions.set(peerKey(peer), version);
+      }));
+    } finally {
+      syncingDismissals = false;
+      if (version !== dismissalVersion) void syncDismissals();
+    }
+  }
+
   return {
     start() {
+      dismissalTimer = setInterval(syncDismissals, 10000);
+      dismissalTimer.unref();
       if (!automatic) return server.listen(port, listen);
       timer = setInterval(refresh, 10000);
       timer.unref();
@@ -211,12 +252,22 @@ function createMesh(config, hub, log, discover = discoverPeers) {
     async close() {
       closed = true;
       clearInterval(timer);
+      clearInterval(dismissalTimer);
       await stopListener();
     },
     refresh,
     status: () => ({ listen, port, peers: peers.map(peer => peer.address), listening, automatic,
       ...(discoveryError ? { error: discoveryError } : {}) }),
     outgoing,
+    broadcastDismissals(ids) {
+      for (const id of ids) {
+        localDismissals.delete(id);
+        localDismissals.add(id);
+        if (localDismissals.size > DISMISSAL_LIMIT) localDismissals.delete(localDismissals.values().next().value);
+      }
+      ++dismissalVersion;
+      void syncDismissals();
+    },
     async approval(info, timeoutMs, res) {
       const card = hub.approvalCard(info, timeoutMs);
       const controller = new AbortController();
@@ -260,4 +311,4 @@ function createMesh(config, hub, log, discover = discoverPeers) {
   };
 }
 
-module.exports = { createMesh, validateConfig, discoverySnapshot };
+module.exports = { createMesh, validateConfig, discoverySnapshot, notificationIds, DISMISSAL_LIMIT };
