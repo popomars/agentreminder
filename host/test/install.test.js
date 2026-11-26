@@ -105,13 +105,17 @@ exit 1
 
 test('installer stages firmware, and its uninstaller removes only managed files and hooks', { timeout: 15000 }, async t => {
   const { home, state, codex, env } = fixture(t);
+  const workbuddyFile = path.join(home, '.workbuddy', 'settings.json');
+  const workbuddyConfig = { hooks: { Stop: [{ hooks: [{ type: 'command', command: 'echo keep' }] }] }, preference: 'keep' };
+  fs.mkdirSync(path.dirname(workbuddyFile));
+  fs.writeFileSync(workbuddyFile, JSON.stringify(workbuddyConfig));
   const fakePython = path.join(home, 'fake-python');
   const flashLog = path.join(home, 'flash.log');
   fs.writeFileSync(fakePython, '#!/bin/sh\ncase "$1 $2" in -c\\ *) exit 0;; "-m esptool") printf "%s\\n" "$@" > "$FLASH_LOG";; *) exit 1;; esac\n', { mode: 0o700 });
   env.AGENTREMINDER_FLASH_PYTHON = fakePython;
   env.FLASH_LOG = flashLog;
   const { stdout } = await run('bash', ['install.sh', '--no-menu-bar', '--lang', 'en', '--flash', '--port', '/dev/null',
-    '--no-pair', '--agent', 'codex', '--agent', 'claude', '--agent', 'dsh'], { cwd: root, env });
+    '--no-pair', '--agent', 'codex', '--agent', 'claude', '--agent', 'dsh', '--agent', 'workbuddy'], { cwd: root, env });
   assert.match(stdout, /Firmware SHA-256 verification passed/);
   assert.match(stdout, /AgentReminder is installed/);
   const app = path.join(state, 'app');
@@ -119,6 +123,9 @@ test('installer stages firmware, and its uninstaller removes only managed files 
   assert(fs.statSync(firmware).size > 1_000_000);
   assert(fs.readFileSync(flashLog, 'utf8').split('\n').includes(firmware));
   assert(!fs.existsSync(path.join(state, 'daemon.pid')));
+  const workbuddyHooks = JSON.parse(fs.readFileSync(workbuddyFile)).hooks;
+  assert.deepEqual(Object.keys(workbuddyHooks), ['Stop']);
+  assert.match(workbuddyHooks.Stop[1].hooks[0].command, /--agent workbuddy --event stop$/);
 
   const hookFile = path.join(codex, 'hooks.json');
   const original = JSON.parse(fs.readFileSync(hookFile));
@@ -148,6 +155,7 @@ test('installer stages firmware, and its uninstaller removes only managed files 
   assert.deepEqual(JSON.parse(fs.readFileSync(hookFile)), { hooks: { PermissionRequest: [{ hooks: [unrelated] }] }, foo: 'keep' });
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(home, '.claude/settings.json'))), { hooks: {} });
   assert.deepEqual(JSON.parse(fs.readFileSync(path.join(state, 'dsh-hooks.json'))), { hooks: {} });
+  assert.deepEqual(JSON.parse(fs.readFileSync(workbuddyFile)), workbuddyConfig);
   assert.equal(fs.readFileSync(configPath, 'utf8'), config);
   assert(fs.existsSync(path.join(state, 'daemon.log')));
   assert.deepEqual(fs.readdirSync(app), ['mine.txt']);
@@ -237,7 +245,7 @@ test('macOS installs and launches the menu bar app by default', { skip: process.
 
   const app = path.join(state, 'app');
   assert(fs.lstatSync(bundle).isDirectory());
-  assert.deepEqual(fs.readFileSync(launched, 'utf8').trimEnd().split('\n'), ['-n', fs.realpathSync(bundle), '--args', '--replace-existing']);
+  assert.deepEqual(fs.readFileSync(launched, 'utf8').trimEnd().split('\n'), ['-n', fs.realpathSync(bundle), '--args', '--replace-existing', '--register-login']);
   await run('codesign', ['--verify', '--strict', bundle]);
   assert(fs.existsSync(path.join(app, 'flash.sh')));
   assert(fs.existsSync(path.join(app, 'firmware/release/waveshare-amoled-2.16/firmware.bin')));
@@ -277,19 +285,91 @@ if (endpoint === 'commits/' + revision) {
 }
 `, { mode: 0o700 });
 
-  await run('bash', [downloaded, '--ref', revision, '--agent', 'codex'], { cwd: home, env });
+  fs.mkdirSync(codex);
+  fs.mkdirSync(path.join(home, '.workbuddy'));
+  await run('bash', [downloaded, '--ref', revision], { cwd: home, env });
   const bundle = path.join(state, 'app', 'AgentReminder.app');
   assert.deepEqual(fs.readFileSync(opened, 'utf8').trimEnd().split('\n'),
     ['-n', fs.realpathSync(bundle), '--args', '--replace-existing', '--setup-usb']);
   const fetched = fs.readFileSync(requests, 'utf8').trimEnd().split('\n');
   assert.equal(fetched[0], 'commits/' + revision);
   assert(fetched.includes('contents/host/menu-bar/Main.swift'));
+  assert(fetched.includes('contents/host/workbuddy.js'));
   assert(fetched.includes('contents/firmware/release/waveshare-amoled-2.16/firmware.bin'));
   assert(fetched.includes('contents/firmware/release/folotoy-ai-passport/AgentReminder-AI-Passport-app.bin'));
   assert(JSON.parse(fs.readFileSync(path.join(codex, 'hooks.json'), 'utf8')).hooks.Stop);
+  assert(JSON.parse(fs.readFileSync(path.join(home, '.workbuddy/settings.json'), 'utf8')).hooks.Stop);
   const installation = JSON.parse(fs.readFileSync(path.join(bundle, 'Contents/Resources/Installation.json'), 'utf8'));
   assert(path.isAbsolute(installation.node));
   assert(path.isAbsolute(installation.python));
+});
+
+test('WorkBuddy can be configured and paused independently from the menu', { timeout: 15000 }, async t => {
+  const { home, state, env } = fixture(t);
+  const portServer = http.createServer();
+  const port = await listen(portServer);
+  await new Promise(resolve => portServer.close(resolve));
+  const configFile = path.join(state, 'config.json');
+  fs.writeFileSync(configFile, JSON.stringify({
+    httpPort: port, usb: { enabled: false }, bluetooth: { enabled: false }, unrelated: 'keep',
+  }));
+  const host = path.join(root, 'host/agentreminder.js');
+  const daemon = spawn(process.execPath, [host, 'daemon'], { env, stdio: 'ignore' });
+  t.after(() => daemon.kill());
+  const address = `http://127.0.0.1:${port}`;
+  const get = route => fetch(address + route).then(response => response.json());
+  let inbox;
+  for (let i = 0; i < 60; i++) {
+    inbox = await get('/inbox').catch(() => null);
+    if (inbox?.canManageIntegrations) break;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  assert.deepEqual(inbox.agentIntegrations, { workbuddy: 'unconfigured' });
+  const token = fs.readFileSync(path.join(state, 'menu-setup.token'), 'utf8').trim();
+  const post = (route, body, authenticated = false) => fetch(address + route, {
+    method: 'POST', headers: {
+      'content-type': 'application/json', ...(authenticated ? { 'x-agentreminder-setup': token } : {}),
+    }, body: JSON.stringify(body),
+  });
+  const toggle = (agent, enabled) => post('/agent-integrations', { agent, enabled }, true);
+  assert.equal((await post('/agent-integrations', { agent: 'workbuddy', enabled: true })).status, 403);
+  assert.equal((await toggle('unknown', true)).status, 400);
+  assert.deepEqual(await (await toggle('workbuddy', true)).json(), { status: 'enabled', installedHooks: true });
+  async function stop(agent) {
+    const processHandle = spawn(process.execPath, [host, 'hook', '--agent', agent, '--event', 'stop'], { env });
+    const exit = new Promise(resolve => processHandle.once('exit', resolve));
+    processHandle.stdin.end(JSON.stringify({ session_id: agent, last_assistant_message: agent }));
+    assert.equal(await exit, 0);
+  }
+  const audit = path.join(home, '.workbuddy', 'audit-log', 'spool');
+  fs.mkdirSync(audit, { recursive: true });
+  const auditFile = path.join(audit, 'audit-spool-1-' + new Date().toISOString().slice(0, 10) + '.jsonl');
+  function ask(requestId) {
+    fs.appendFileSync(auditFile, JSON.stringify({ eventType: 'command-safety.ask-matched', timestamp: Date.now(),
+      sessionId: requestId, requestId, toolCallId: 'tool', commandPreview: 'do not relay arguments' }) + '\n');
+  }
+  await stop('workbuddy');
+  ask('before-disable');
+  let notes;
+  for (let i = 0; i < 30; i++) {
+    notes = (await get('/inbox')).notifications;
+    if (notes.some(note => note.kind === 'input')) break;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  assert(notes.some(note => note.kind === 'input' && note.detail === '请回到 WorkBuddy 确认'));
+  assert(notes.some(note => note.kind === 'done' && note.detail === 'workbuddy'));
+  assert.deepEqual((await get('/status')).pending, []);
+  assert.deepEqual(await (await toggle('workbuddy', false)).json(), { status: 'disabled' });
+  await stop('workbuddy');
+  ask('while-disabled');
+  await new Promise(resolve => setTimeout(resolve, 1100));
+  assert.deepEqual((await get('/inbox')).notifications, notes);
+  assert.deepEqual((await get('/inbox')).agentIntegrations, { workbuddy: 'disabled' });
+  await stop('claude');
+  assert((await get('/inbox')).notifications.some(note => note.detail === 'claude'));
+  assert.deepEqual(await (await toggle('workbuddy', true)).json(), { status: 'enabled' });
+  assert.equal(JSON.parse(fs.readFileSync(configFile, 'utf8')).unrelated, 'keep');
+  assert.equal((await get('/status')).pid, daemon.pid);
 });
 
 test('menu firmware flash works without a device handshake and keeps the daemon inbox', { timeout: 15000 }, async t => {

@@ -1,4 +1,5 @@
 import AppKit
+import ServiceManagement
 
 private struct Installation: Decodable {
     let node: String
@@ -8,6 +9,7 @@ private struct Installation: Decodable {
 
     var stateDirectory: URL { URL(fileURLWithPath: statePath, isDirectory: true) }
 
+    var loginItemMarker: URL { stateDirectory.appendingPathComponent("login-item-registered") }
     var host: URL { stateDirectory.appendingPathComponent("app/host/agentreminder.js") }
     var flashScript: URL { stateDirectory.appendingPathComponent("app/flash.sh") }
     var legacyApp: URL { stateDirectory.appendingPathComponent("app/AgentReminder.app") }
@@ -72,6 +74,8 @@ private struct Inbox: Decodable {
     let canClear: Bool?
     let canUpdateFirmware: Bool?
     let canSendTest: Bool?
+    let canManageIntegrations: Bool?
+    let agentIntegrations: [String: String]?
 }
 
 private struct Pairing: Decodable {
@@ -81,6 +85,7 @@ private struct Pairing: Decodable {
 }
 
 private struct ReadResult: Decodable { let ok: Bool }
+private struct AgentIntegrationResult: Decodable { let status: String; let installedHooks: Bool? }
 private struct TestResult: Decodable { let delivered: Int }
 
 private enum FirmwareBoard: String, CaseIterable {
@@ -127,6 +132,7 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var pairing = false
     private var setupUsb = ProcessInfo.processInfo.arguments.contains("--setup-usb")
     private var configuringCodex = false
+    private var updatingWorkBuddy = false
     private var trackingMenu = false
     private var firmwareUpdate: FirmwareUpdate?
 
@@ -188,6 +194,22 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
             button.imagePosition = .imageLeading
         }
         redraw()
+        Task {
+            let defaultState = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".agentreminder")
+            if installation.stateDirectory.resolvingSymlinksInPath().path == defaultState.resolvingSymlinksInPath().path {
+                do {
+                    let result = try await runCodexSetup("restore")
+                    if result.exitCode != 0 {
+                        NSLog("AgentReminder could not restore Codex Dock configuration: %@",
+                              String(decoding: result.output, as: UTF8.self))
+                    }
+                } catch { NSLog("AgentReminder could not run Codex Dock setup: %@", error.localizedDescription) }
+            }
+        }
+        if ProcessInfo.processInfo.arguments.contains("--register-login"),
+           !UserDefaults.standard.bool(forKey: "AgentReminderLoginItemOptOut") {
+            registerAtLogin()
+        }
         if setupUsb { startService(force: true) }
         refresh()
         timer = Timer(timeInterval: 2, repeats: true) { [weak self] _ in
@@ -204,6 +226,11 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         request.timeoutInterval = timeout
         request.httpBody = body
         if method == "POST" { request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
+        if path == "agent-integrations" {
+            let tokenFile = installation.stateDirectory.appendingPathComponent("menu-setup.token")
+            let token = try String(contentsOf: tokenFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+            request.setValue(token, forHTTPHeaderField: "X-AgentReminder-Setup")
+        }
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse,
               (200..<300).contains(http.statusCode) || (path == "pair" && http.statusCode == 409)
@@ -342,6 +369,7 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         menu.addItem(action(label("发送测试通知", "Send test notification"), #selector(sendTest),
                             enabled: inbox?.canSendTest == true && firmwareUpdate == nil))
+        addWorkBuddyIntegration()
         if installation.codexApp != nil {
             let codex = action(label("Codex 桌面双端审批", "Codex Desktop approvals"))
             let options = NSMenu(title: codex.title)
@@ -355,11 +383,110 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(codex)
         }
         menu.addItem(.separator())
+        let login = action(label("登录时启动", "Launch at login"), #selector(toggleLoginItem))
+        switch SMAppService.mainApp.status {
+        case .enabled: login.state = .on
+        case .requiresApproval: login.state = .mixed
+        default: break
+        }
+        menu.addItem(login)
         menu.addItem(action(label("退出菜单栏应用", "Quit menu bar app"), #selector(quit), enabled: firmwareUpdate == nil))
     }
 
     @objc private func retry() { startService(force: true) }
     @objc private func quit() { NSApp.terminate(nil) }
+
+    private func addWorkBuddyIntegration() {
+        let state = inbox?.agentIntegrations?["workbuddy"]
+        let status: String
+        switch state {
+        case "enabled": status = label("已启用", "Enabled")
+        case "disabled": status = label("已停用", "Disabled")
+        case "unconfigured": status = label("待配置", "Not configured")
+        default: status = label("状态不可用", "Status unavailable")
+        }
+        let integrations = action(label("Agent 接入", "Agent integrations"))
+        let agents = NSMenu(title: integrations.title)
+        let workbuddy = action("WorkBuddy · \(status)")
+        let options = NSMenu(title: "WorkBuddy")
+        options.autoenablesItems = false
+        let ready = inbox?.canManageIntegrations == true && !updatingWorkBuddy
+        for enabled in [true, false] {
+            let option = action(enabled ? label("启用", "Enable") : label("停用", "Disable"),
+                                #selector(toggleWorkBuddy(_:)), enabled: ready)
+            option.state = state == (enabled ? "enabled" : "disabled") ? .on : .off
+            option.representedObject = enabled
+            options.addItem(option)
+        }
+        options.addItem(.separator())
+        options.addItem(action(label("命令审批请回 WorkBuddy 确认", "Confirm command approvals in WorkBuddy"),
+                               enabled: false))
+        workbuddy.submenu = options
+        agents.addItem(workbuddy)
+        integrations.submenu = agents
+        menu.addItem(integrations)
+    }
+
+    @objc private func toggleWorkBuddy(_ sender: NSMenuItem) {
+        guard inbox?.canManageIntegrations == true, !updatingWorkBuddy,
+              let enabled = sender.representedObject as? Bool else { return }
+        updatingWorkBuddy = true
+        redraw()
+        Task {
+            defer { updatingWorkBuddy = false; refresh(); redraw() }
+            do {
+                let body = try JSONSerialization.data(withJSONObject: ["agent": "workbuddy", "enabled": enabled])
+                let result: AgentIntegrationResult = try await request("agent-integrations", method: "POST", body: body)
+                guard result.status == (enabled ? "enabled" : "disabled") else { throw URLError(.badServerResponse) }
+                if result.installedHooks == true {
+                    showAlert(label("已配置 WorkBuddy", "WorkBuddy configured"),
+                              label("请重开 WorkBuddy。设备会收到任务完成通知和命令待确认提醒。",
+                                    "Reopen WorkBuddy to receive task completions and command approval reminders on your device."))
+                }
+            } catch {
+                showAlert(label("无法更新 WorkBuddy 接入", "Could not update WorkBuddy"),
+                          label("请检查本机服务和 WorkBuddy 的 hook 配置后重试。",
+                                "Check the local service and the WorkBuddy hook configuration, then try again."))
+            }
+        }
+    }
+
+    private func registerAtLogin() {
+        let service = SMAppService.mainApp
+        if service.status == .notRegistered || service.status == .notFound {
+            do { try service.register() } catch {
+                NSLog("AgentReminder login item registration failed: %@", error.localizedDescription)
+            }
+        }
+        if service.status == .enabled || service.status == .requiresApproval {
+            FileManager.default.createFile(atPath: installation.loginItemMarker.path, contents: nil)
+        }
+    }
+
+    @objc private func toggleLoginItem() {
+        let service = SMAppService.mainApp
+        switch service.status {
+        case .requiresApproval:
+            SMAppService.openSystemSettingsLoginItems()
+        case .enabled:
+            do {
+                try service.unregister()
+                UserDefaults.standard.set(true, forKey: "AgentReminderLoginItemOptOut")
+                try? FileManager.default.removeItem(at: installation.loginItemMarker)
+            } catch {
+                showAlert(label("无法关闭登录启动", "Could not disable launch at login"), error.localizedDescription)
+            }
+        default:
+            UserDefaults.standard.removeObject(forKey: "AgentReminderLoginItemOptOut")
+            registerAtLogin()
+            if service.status != .enabled {
+                showAlert(label("请检查登录项", "Check Login Items"),
+                          label("在系统设置的「登录项与扩展」中允许 AgentReminder。",
+                                "Allow AgentReminder in System Settings under Login Items & Extensions."))
+            }
+        }
+        redraw()
+    }
 
     @objc private func sendTest() {
         Task {
@@ -375,6 +502,31 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
             } catch {
                 showAlert(label("无法发送测试通知", "Could not send the test notification"),
                           label("请检查铃铛是否已连接本机服务。", "Check the bell’s connection to the local service."))
+            }
+        }
+    }
+
+    private func runCodexSetup(_ command: String, app: URL? = nil) async throws -> (exitCode: Int32, output: Data) {
+        try await withCheckedThrowingContinuation { continuation in
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: installation.node)
+            process.arguments = [installation.codexSetup.path, command]
+            var environment = installation.processEnvironment
+            if let app { environment["AGENTREMINDER_CODEX_APP"] = app.path }
+            process.environment = environment
+
+            let pipe = Pipe()
+            process.standardOutput = pipe
+            process.standardError = pipe
+            process.terminationHandler = { completed in
+                let data = pipe.fileHandleForReading.readDataToEndOfFile()
+                continuation.resume(returning: (completed.terminationStatus, data))
+            }
+            do {
+                try process.run()
+                try? pipe.fileHandleForWriting.close()
+            } catch {
+                continuation.resume(throwing: error)
             }
         }
     }
@@ -396,33 +548,19 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         configuringCodex = true
         redraw()
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: installation.node)
-        process.arguments = [installation.codexSetup.path, command]
-        var environment = installation.processEnvironment
-        environment["AGENTREMINDER_CODEX_APP"] = app.path
-        process.environment = environment
-        let output = Pipe()
-        process.standardOutput = output
-        process.standardError = output
-        process.terminationHandler = { [weak self] completed in
-            let succeeded = completed.terminationStatus == 0
-            let details = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
-            Task { @MainActor in
-                guard let self else { return }
-                self.configuringCodex = false
-                self.redraw()
-                if succeeded {
-                    self.showAlert(self.label("Codex 配置已应用", "Codex setup applied"), restartMessage)
+        Task {
+            defer { configuringCodex = false; redraw() }
+            do {
+                let result = try await runCodexSetup(command, app: app)
+                if result.exitCode == 0 {
+                    showAlert(label("Codex 配置已应用", "Codex setup applied"), restartMessage)
                 } else {
-                    self.showAlert(self.label("无法更新 Codex 配置", "Could not update Codex setup"), details)
+                    showAlert(label("无法更新 Codex 配置", "Could not update Codex setup"),
+                              String(decoding: result.output, as: UTF8.self))
                 }
+            } catch {
+                showAlert(label("无法启动 Codex 配置", "Could not start Codex setup"), error.localizedDescription)
             }
-        }
-        do { try process.run() } catch {
-            configuringCodex = false
-            redraw()
-            showAlert(label("无法启动 Codex 配置", "Could not start Codex setup"), error.localizedDescription)
         }
     }
 
@@ -624,6 +762,14 @@ private struct AgentReminderApp {
             error.messageText = "AgentReminder installation is incomplete."
             error.runModal()
             exit(1)
+        }
+        if ProcessInfo.processInfo.arguments.contains("--unregister-login") {
+            let service = SMAppService.mainApp
+            if service.status == .enabled || service.status == .requiresApproval {
+                do { try service.unregister() } catch { exit(1) }
+            }
+            try? FileManager.default.removeItem(at: installation.loginItemMarker)
+            return
         }
         let menuBar = MenuBar(installation: installation)
         app.setActivationPolicy(.accessory)

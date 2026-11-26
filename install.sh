@@ -10,21 +10,23 @@ pair=true
 menu_bar=false
 if [[ "$platform" == Darwin ]]; then menu_bar=true; fi
 install_hooks=true
+autostart=true
 flash=false
 board=
 flash_port=
 flash_baud=
 lang=zh
 agents=()
+auto_workbuddy=false
 say() { if [[ "$lang" == en ]]; then printf '%s\n' "$2"; else printf '%s\n' "$1"; fi; }
 usage() {
-  say '用法：bash install.sh [--agent codex|claude|dsh] [--ref REF] [--flash [--board waveshare-amoled-2.16|folotoy-passport] [--port DEVICE] [--baud RATE]] [--menu-bar|--no-menu-bar] [--skip-hooks] [--no-pair] [--lang zh|en]' \
-      'Usage: bash install.sh [--agent codex|claude|dsh] [--ref REF] [--flash [--board waveshare-amoled-2.16|folotoy-passport] [--port DEVICE] [--baud RATE]] [--menu-bar|--no-menu-bar] [--skip-hooks] [--no-pair] [--lang zh|en]'
+  say '用法：bash install.sh [--agent codex|claude|dsh|workbuddy] [--ref REF] [--flash [--board waveshare-amoled-2.16|folotoy-passport] [--port DEVICE] [--baud RATE]] [--menu-bar|--no-menu-bar] [--skip-hooks] [--no-pair] [--no-autostart] [--lang zh|en]' \
+      'Usage: bash install.sh [--agent codex|claude|dsh|workbuddy] [--ref REF] [--flash [--board waveshare-amoled-2.16|folotoy-passport] [--port DEVICE] [--baud RATE]] [--menu-bar|--no-menu-bar] [--skip-hooks] [--no-pair] [--no-autostart] [--lang zh|en]'
 }
 while (( $# )); do
   case "$1" in
     --agent)
-      case "${2:-}" in codex|claude|dsh) agents+=("$2");; *) usage >&2; exit 2;; esac
+      case "${2:-}" in codex|claude|dsh|workbuddy) agents+=("$2");; *) usage >&2; exit 2;; esac
       shift 2;;
     --ref)
       if [[ ! ${2:-} =~ ^[A-Za-z0-9._/-]+$ ]]; then usage >&2; exit 2; fi
@@ -41,6 +43,7 @@ while (( $# )); do
     --no-menu-bar) menu_bar=false; shift;;
     --skip-hooks) install_hooks=false; shift;;
     --no-pair) pair=false; shift;;
+    --no-autostart) autostart=false; shift;;
     -h|--help) usage; exit 0;;
     *) usage >&2; exit 2;;
   esac
@@ -73,11 +76,9 @@ if "$install_hooks" && (( ${#agents[@]} == 0 )); then
     -x "$HOME/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex" ]]; then agents+=(codex); fi
   if command -v claude >/dev/null || [[ -d "$HOME/.claude" ]]; then agents+=(claude); fi
   if command -v dsh >/dev/null; then agents+=(dsh); fi
-fi
-if "$install_hooks" && (( ${#agents[@]} == 0 )); then
-  say '未找到 agent。安装 agent 后可用 --agent codex、--agent claude 或 --agent dsh 配置 hooks。' \
-      'No agent detected. After installing one, rerun with --agent codex, --agent claude, or --agent dsh to set up its hooks.' >&2
-  if ! "$menu_bar"; then exit 1; fi
+  if [[ -d "$HOME/.workbuddy" || -d /Applications/WorkBuddy.app || -d "$HOME/Applications/WorkBuddy.app" ]]; then
+    auto_workbuddy=true
+  fi
 fi
 
 install_dir="${AGENTREMINDER_HOME:-"$HOME/.agentreminder"}/app"
@@ -148,16 +149,32 @@ else
     github_get "contents/$file?ref=$sha" application/vnd.github.raw+json > "$stage/$file"
   done
 fi
-# Older refs predate the Tailnet module. Fetch it only when the selected runtime uses it.
-if grep -Fq "require('./tailnet')" "$stage/host/agentreminder.js"; then
-  tailnet_file=host/tailnet.js
-  if [[ -n ${sha:-} ]]; then
-    github_get "contents/$tailnet_file?ref=$sha" application/vnd.github.raw+json > "$stage/$tailnet_file"
-  else
-    cp "$source_dir/$tailnet_file" "$stage/$tailnet_file"
+# Fetch runtime modules only when the selected revision uses them.
+for module in tailnet workbuddy; do
+  if grep -Fq "require('./$module')" "$stage/host/agentreminder.js"; then
+    file="host/$module.js"
+    if [[ -n ${sha:-} ]]; then
+      github_get "contents/$file?ref=$sha" application/vnd.github.raw+json > "$stage/$file"
+    else
+      cp "$source_dir/$file" "$stage/$file"
+    fi
+    node --check "$stage/$file"
+    files+=("$file")
   fi
-  node --check "$stage/$tailnet_file"
-  files+=("$tailnet_file")
+done
+if "$auto_workbuddy" && [[ -f "$stage/host/workbuddy.js" ]]; then agents+=(workbuddy); fi
+if "$install_hooks"; then
+  for agent in "${agents[@]+"${agents[@]}"}"; do
+    if [[ "$agent" == workbuddy && ! -f "$stage/host/workbuddy.js" ]]; then
+      say '所选版本不支持 WorkBuddy。' 'The selected revision does not support WorkBuddy.' >&2
+      exit 2
+    fi
+  done
+  if (( ${#agents[@]} == 0 )); then
+    say '未找到 agent。安装 agent 后可用 --agent 选项配置 hooks。' \
+        'No agent detected. After installing one, rerun with the --agent option to configure hooks.' >&2
+    if ! "$menu_bar"; then exit 1; fi
+  fi
 fi
 if "$menu_bar"; then
   mkdir -p "$stage/menu-bar"
@@ -270,6 +287,7 @@ if "$menu_bar"; then
   fi
   rm -rf "$menu_stage/previous.app"
   launch_args=(--replace-existing)
+  if "$autostart" && [[ -z ${AGENTREMINDER_HOME:-} ]]; then launch_args+=(--register-login); fi
   if "$pair"; then launch_args+=(--setup-usb); fi
   if open -n "$menu_path" --args "${launch_args[@]}"; then
     say '请从菜单栏的 AgentReminder 铃铛开始配对或发送测试通知。' 'Open the AgentReminder bell in the menu bar to pair a device or send a test notification.'
@@ -294,5 +312,8 @@ for agent in ${agents[@]+"${agents[@]}"}; do
   elif [[ "$agent" == codex ]]; then
     say '重开 Codex，并用 /hooks 审核及信任 AgentReminder 的 hooks。' \
         'Reopen Codex and use /hooks to review and trust AgentReminder hooks.'
+  elif [[ "$agent" == workbuddy ]]; then
+    say '请重开 WorkBuddy，以加载任务完成通知。命令审批仍在 WorkBuddy 确认。' \
+        'Reopen WorkBuddy to load completion notifications. Confirm command approvals in WorkBuddy.'
   fi
 done

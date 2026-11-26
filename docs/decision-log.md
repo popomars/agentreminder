@@ -133,7 +133,10 @@ run after the installing terminal closes. Upgrades replace the old bell
 without restarting the same-version daemon. The app starts or connects to
 the host daemon on loopback. Headless installations can use
 `--no-menu-bar`. Pairing, firmware and the local delivery test are in
-the bell menu.
+the bell menu. The installer registers AgentReminder as the macOS login item.
+When the menu launches, it restores opt-in Codex Dock configuration and
+migrates the older AgentReminder-owned Codex LaunchAgent that macOS showed
+as `sh`.
 The daemon owns unread counts and retains the latest notification in each
 host, project, and conversation group, up to 100 groups. The app shows the
 latest notification and its reception time. The app uses the existing USB pairing endpoint and the
@@ -159,3 +162,15 @@ behavior. Touch targets follow the edge with the physical keys. Waveshare
 keeps its left, center and right approval actions. Sound uses the shared
 preference, and the square panel uses LVGL rotation and matching touch input
 when the controls move to the right edge.
+
+### ADR-0011: Remind users to confirm WorkBuddy command approvals on the Mac
+
+- Date: 2026-11-26
+- Status: Accepted
+
+WorkBuddy Desktop forwards task completion through its `Stop` hook.
+WorkBuddy 5.11.3 emits a command safety audit event when its native approval
+appears. The existing AgentReminder daemon reads that event from the live
+spool or daily audit file and sends a notification. It deduplicates both
+sources and omits shell commands and arguments. The user makes the approval
+decision in WorkBuddy. One menu switch controls both WorkBuddy paths.

@@ -36,6 +36,15 @@ notifications left the pending approval in place. Clearing both reset the two
 counts, withdrew the card from the physical device, and returned the approval
 to its originating client.
 
+The installer and menu support WorkBuddy Desktop. Its Stop hook forwards
+completion, and a command safety audit event produces a reminder to confirm
+in WorkBuddy. The menu switch controls both paths independently of other agents.
+WorkBuddy 5.11.3 on macOS delivered both cards to a physical AI Passport.
+
+The AgentReminder login item now restores Codex Dock configuration and
+removes the legacy AgentReminder-owned shell LaunchAgent during migration.
+The migration and restoration of the GUI environment were verified on the Mac.
+
 The menu notification list retains the latest entry and receipt time per host,
 project, and conversation. Unread counts and clear actions use the displayed
 entries. Clearing an older snapshot cannot clear a replacement notification.

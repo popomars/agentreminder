@@ -24,7 +24,7 @@ curl -fsS -H 'Accept: application/vnd.github.raw+json' \
   bash agentreminder-install.sh --ref "$revision" --lang en
 ```
 
-After setup, click the **AgentReminder bell** in the menu bar. The installer puts a complete `AgentReminder.app` in your user Applications folder (`~/Applications`) and launches it through macOS. You can close Terminal. After quitting the app or restarting your Mac, choose Go → Go to Folder in Finder, enter `~/Applications`, and double-click **AgentReminder**.
+After setup, click the **AgentReminder bell** in the menu bar. The installer puts a complete `AgentReminder.app` in your user Applications folder (`~/Applications`) and launches it through macOS. You can close Terminal. Setup registers the app to open when you sign in. Manage it under **Launch at login**. After quitting the app, choose Go → Go to Folder in Finder, enter `~/Applications`, and double-click **AgentReminder**.
 
 ### 2. Pair from the bell
 
@@ -37,7 +37,7 @@ To move a board to a new Mac, connect it by USB and pair from the bell on the ne
 
 ### 3. Connect your agent
 
-The installer sets up hooks for detected Codex, Claude Code, and dsh installations and preserves other hooks. After installing another agent, rerun setup, for example with `bash install.sh --agent codex`.
+The installer sets up hooks for detected Codex, Claude Code, dsh, and WorkBuddy installations and preserves other hooks. If you install WorkBuddy later, choose **Agent integrations → WorkBuddy → Enable** in the bell menu or run `bash install.sh --agent workbuddy`.
 
 | Agent | After installation |
 | --- | --- |
@@ -45,6 +45,7 @@ The installer sets up hooks for detected Codex, Claude Code, and dsh installatio
 | Codex Desktop | Choose **Codex Desktop approvals → Enable…** in the bell menu. Quit ChatGPT completely, then reopen it from the usual Dock icon. Use manual approval and set the reviewer to the user. |
 | Claude Code | Open a new session. AgentReminder supports `AskUserQuestion` and, on version 2.1.76 or later, `Elicitation`. |
 | dsh | Install the Claude Code hooks bridge in your profile, merge the Cordis example, and set `configPath` to the absolute path of `~/.agentreminder/dsh-hooks.json`. [Cordis configuration](integrations/dsh/cordis.patch.yml) |
+| WorkBuddy (macOS) | Reopen WorkBuddy. Task completions are forwarded automatically. When a command triggers WorkBuddy's local security approval, the device prompts you to return to WorkBuddy to confirm. Approval reminders appear under **Notifications**. |
 
 After a real task finishes, open the bell to view the notification. Respond to approvals in the originating agent or on the device. Codex Desktop mirrors native command and file approvals, and the first response wins. If the board disconnects, times out, or hands a request back, continue in the originating conversation.
 
@@ -57,7 +58,9 @@ After a real task finishes, open the bell to view the notification. Respond to a
 | **Pair a new device…** | Adds or re-pairs a board over USB. |
 | **Install or update firmware…** | Installs the bundled firmware for the selected model. Keep USB connected while writing. Paired boards reconnect after restarting. |
 | **Send test notification** | Checks delivery to the menu and local devices. |
-| **Codex Desktop approvals** | Appears when a supported ChatGPT Desktop installation is found. Enable or disable the integration, then reopen the app from the usual Dock icon. |
+| **Agent integrations** | Enables or disables WorkBuddy independently. Disabling it pauses new WorkBuddy completions and approval reminders. |
+| **Launch at login** | Appears as AgentReminder in macOS Login Items & Extensions. It starts the bell and local service, and restores the Codex Dock configuration when enabled. |
+| **Codex Desktop approvals** | Appears when a supported ChatGPT Desktop installation is found. Enable or disable the integration, then reopen the app from the usual Dock icon. If ChatGPT opens before the bell at login, reopen ChatGPT. |
 
 The board shows one approval at a time with a five-minute default deadline. For a question with two preset answers, use the indicated buttons. Return to the original conversation for extra choices, text input, or authentication. Press **PWR** briefly on Waveshare or the bottom function button on Passport in portrait orientation to hand a question back.
 
@@ -69,7 +72,7 @@ On Waveshare, the idle screen shows the host, Bluetooth, and USB status. In the 
 
 ## Update or uninstall
 
-- **Update the Mac app and hooks**. Rerun the same installer. It retains pairing and opens the updated bell. Reopen your agent to load its updated hooks.
+- **Update the Mac app and hooks**. Rerun the same installer. It retains pairing and opens the updated bell. Reopen your agent to load its updated hooks. Pass `--no-autostart` to skip registering a login item during installation.
 - **Update board firmware**. Use **Install or update firmware…** from the bell.
 - **Uninstall**. Run `bash ~/.agentreminder/app/uninstall.sh --lang en` to remove the app, host software, and installer-managed hooks while retaining pairings, logs, and unrelated hooks.
 
