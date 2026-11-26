@@ -96,6 +96,10 @@ private struct Card: Decodable {
     let receivedTime: String?
     let unread: Bool?
     let kind: String?
+    let interaction: Bool?
+    let choices: [String]?
+    let actionable: Bool?
+    let operation: String?
 
     var summary: String {
         [host, project, conversation, receivedTime].compactMap { $0 }
@@ -109,6 +113,7 @@ private struct Inbox: Decodable {
     let approvals: [Card]
     let devices: Int
     let canClear: Bool?
+    let canResolveApprovals: Bool?
     let canUpdateFirmware: Bool?
     let canSendTest: Bool?
     let canInitializeTailnet: Bool?
@@ -211,6 +216,8 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var codexStatusCheck: Task<Void, Never>?
     private var codexMenuItem: NSMenuItem?
     private var notificationMenuItem: NSMenuItem?
+    private var approvalMenuItem: NSMenuItem?
+    private var activeApproval: (id: String, alert: NSAlert)?
     private var configuringTailnet = false
     private var updatingHookAgents: Set<AgentIntegration> = []
     private var checkingUpdates = false
@@ -298,7 +305,10 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         timer = Timer(timeInterval: 2, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
         }
-        if let timer { RunLoop.main.add(timer, forMode: .common) }
+        if let timer {
+            RunLoop.main.add(timer, forMode: .common)
+            RunLoop.main.add(timer, forMode: .modalPanel)
+        }
     }
 
     private func request<T: Decodable>(
@@ -309,10 +319,15 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         request.timeoutInterval = timeout
         request.httpBody = body
         if method == "POST" { request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
-        if path == "tailnet/setup" || path == "agent-integrations" || path == "sleep-prevention" {
-            let tokenFile = installation.stateDirectory.appendingPathComponent("menu-setup.token")
-            let token = try String(contentsOf: tokenFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
-            request.setValue(token, forHTTPHeaderField: "X-AgentReminder-Setup")
+        let tokenFile = installation.stateDirectory.appendingPathComponent("menu-setup.token")
+        if path == "inbox" {
+            if let token = try? String(contentsOf: tokenFile, encoding: .utf8) {
+                request.setValue(token.trimmingCharacters(in: .whitespacesAndNewlines), forHTTPHeaderField: "X-AgentReminder-Setup")
+                request.setValue(String(ProcessInfo.processInfo.processIdentifier), forHTTPHeaderField: "X-AgentReminder-Menu-Pid")
+            }
+        } else if ["tailnet/setup", "agent-integrations", "sleep-prevention", "inbox/decision"].contains(path) {
+            let token = try String(contentsOf: tokenFile, encoding: .utf8)
+            request.setValue(token.trimmingCharacters(in: .whitespacesAndNewlines), forHTTPHeaderField: "X-AgentReminder-Setup")
         }
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse,
@@ -407,6 +422,7 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func addCards(_ cards: [Card], title: String, notifications: Bool = false) {
         let entry = action(title, enabled: !cards.isEmpty)
         if notifications { notificationMenuItem = entry }
+        else { approvalMenuItem = entry }
         if !cards.isEmpty {
             let list = NSMenu(title: title)
             list.autoenablesItems = false
@@ -416,7 +432,8 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     .map { oneLine($0, limit: 24) }.filter { !$0.isEmpty } : []
                 let time = notifications ? card.receivedTime.flatMap { $0.isEmpty ? nil : $0 } : nil
                 let caption = (context + [subject] + [time].compactMap { $0 }).joined(separator: " · ")
-                let row = action((card.unread == true ? "● " : "") + caption, #selector(showCard(_:)))
+                let row = action((card.unread == true ? "● " : "") + caption,
+                                 notifications ? #selector(showCard(_:)) : #selector(showApproval(_:)))
                 row.representedObject = card
                 list.addItem(row)
             }
@@ -427,6 +444,14 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
             entry.submenu = list
         }
         menu.addItem(entry)
+    }
+
+    private func hideResolvedRows(_ entry: NSMenuItem?, cards: [Card], title: String) {
+        let visibleIds = Set(cards.map(\.id))
+        entry?.title = title
+        for row in entry?.submenu?.items ?? [] {
+            if let card = row.representedObject as? Card, !visibleIds.contains(card.id) { row.isHidden = true }
+        }
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -447,19 +472,24 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let inbox {
             item.button?.title = label("通知 \(inbox.unread) · 审批 \(inbox.approvals.count)",
                                        "\(inbox.unread) new · \(inbox.approvals.count) approvals")
+            if let activeApproval, !inbox.approvals.contains(where: { $0.id == activeApproval.id }),
+               NSApp.modalWindow === activeApproval.alert.window {
+                NSApp.abortModal()
+                activeApproval.alert.window.orderOut(nil)
+            }
         }
         if trackingMenu {
-            guard let inbox, let entry = notificationMenuItem else { return }
-            let visibleIds = Set(inbox.notifications.map(\.id))
-            entry.title = label("通知（\(inbox.unread) 未读）", "Notifications (\(inbox.unread) unread)")
-            for row in entry.submenu?.items ?? [] {
-                if let card = row.representedObject as? Card, !visibleIds.contains(card.id) { row.isHidden = true }
-            }
+            guard let inbox else { return }
+            hideResolvedRows(notificationMenuItem, cards: inbox.notifications,
+                             title: label("通知（\(inbox.unread) 未读）", "Notifications (\(inbox.unread) unread)"))
+            hideResolvedRows(approvalMenuItem, cards: inbox.approvals,
+                             title: label("待审批（\(inbox.approvals.count)）", "Pending approvals (\(inbox.approvals.count))"))
             return
         }
         menu.removeAllItems()
         codexMenuItem = nil
         notificationMenuItem = nil
+        approvalMenuItem = nil
         if installingUpdate {
             menu.addItem(action(label("正在安装 AgentReminder 更新…", "Installing AgentReminder update…"), enabled: false))
             return
@@ -1082,6 +1112,48 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if card.unread == true { markRead([card.id]) }
         let message = [card.summary, card.detail ?? ""].filter { !$0.isEmpty }.joined(separator: "\n\n")
         showAlert(cardTitle(card, notification: card.unread != nil), message)
+    }
+
+    @objc private func showApproval(_ sender: NSMenuItem) {
+        guard activeApproval == nil, let snapshot = sender.representedObject as? Card,
+              let card = inbox?.approvals.first(where: { $0.id == snapshot.id }) else { return }
+        let alert = NSAlert()
+        alert.messageText = card.title
+        alert.informativeText = [card.summary, card.detail, card.operation].compactMap { $0 }
+            .filter { !$0.isEmpty }.joined(separator: "\n\n")
+        alert.addButton(withTitle: label("关闭", "Close")).keyEquivalent = "\u{1B}"
+        var decisions: [String] = []
+        if inbox?.canResolveApprovals == true && card.actionable == true {
+            if card.interaction != true {
+                alert.addButton(withTitle: label("拒绝", "Deny")).keyEquivalent = ""
+                alert.addButton(withTitle: label("同意", "Approve")).keyEquivalent = ""
+                decisions += ["deny", "allow"]
+            } else if let choices = card.choices, choices.count == 2 {
+                for choice in choices {
+                    alert.addButton(withTitle: oneLine(choice, limit: 48)).keyEquivalent = ""
+                }
+                decisions += ["deny", "allow"]
+            }
+            alert.addButton(withTitle: label("回原 Agent 处理", "Continue in the agent")).keyEquivalent = ""
+            decisions.append("skip")
+        }
+        activeApproval = (card.id, alert)
+        NSApp.activate(ignoringOtherApps: true)
+        let response = alert.runModal()
+        activeApproval = nil
+        let index = response.rawValue - NSApplication.ModalResponse.alertSecondButtonReturn.rawValue
+        guard decisions.indices.contains(index) else { return }
+        let decision = decisions[index]
+        Task {
+            defer { refresh() }
+            do {
+                let body = try JSONEncoder().encode(["id": card.id, "decision": decision])
+                let _: ReadResult = try await request("inbox/decision", method: "POST", body: body)
+            } catch {
+                showAlert(label("审批提交失败", "Could not submit decision"),
+                          label("请检查 AgentReminder 服务后重试。", "Check the AgentReminder service and try again."))
+            }
+        }
     }
 
     @objc private func markAll() { markRead(inbox?.notifications.filter { $0.unread == true }.map(\.id) ?? []) }

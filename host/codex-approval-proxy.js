@@ -1,6 +1,6 @@
 'use strict';
 
-// Mirror native App Server requests on the ESP32 without changing Codex's UI.
+// Mirror native App Server requests on the menu and ESP32 without changing Codex's UI.
 const { spawn } = require('node:child_process');
 const fs = require('node:fs');
 const os = require('node:os');
@@ -25,6 +25,7 @@ function approvalCard(message) {
     agent: 'codex', title,
     ...describeSession({ thread_id: params.threadId, cwd: params.cwd }, 'codex'),
     reason: typeof reason === 'string' ? reason.slice(0, 300) : '',
+    ...(typeof params.command === 'string' && params.command !== reason ? { detail: params.command.slice(0, 500) } : {}),
   };
 }
 

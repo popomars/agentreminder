@@ -44,9 +44,15 @@ Dismissed notifications now clear by card ID across boards and Mac inboxes
 on the same host or Tailnet group. This keeps newer cards from the same
 conversation visible and lets reconnecting boards catch up on recent clears.
 
-The macOS daemon can prevent idle sleep while retaining normal display sleep.
-The bell toggles the persisted setting, and the assertion follows the daemon's
-lifetime.
+The macOS daemon defaults to preventing idle sleep while retaining normal
+display sleep. The bell remembers an explicit off preference, and the
+assertion follows the daemon's lifetime.
+
+The bell participates in the same approval queue as devices and Tailnet peers.
+It can keep an approval open through a board disconnect. Codex Desktop
+resolution removes the card from the bell and connected devices.
+Reconnecting Bluetooth boards receive those outstanding approvals and up to
+20 unread notifications from the current inbox.
 
 The Agent integrations menu shows Codex Desktop approvals alongside the hook
 integrations, with shared status labels and enable/disable controls. Changing

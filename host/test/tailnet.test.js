@@ -172,6 +172,8 @@ test('three identical meshes share cards, accept one decision, and clear mirrors
   const ports = sockets.map(socket => socket.address().port);
   await Promise.all(sockets.map(socket => new Promise(resolve => socket.close(resolve))));
   const hubs = ports.map((_, i) => new Hub({}, ids => meshes[i].broadcastDismissals(ids)));
+  let remoteMenu = false;
+  hubs[2].menuAvailable = () => remoteMenu;
   const [a, b, c] = hubs.map(hub => attach(hub, 'physical-device'));
   t.after(() => [a, b, c].forEach(d => d.link.close()));
   const meshes = ports.map((port, i) => createMesh({
@@ -238,9 +240,19 @@ test('three identical meshes share cards, accept one decision, and clear mirrors
   assert.deepEqual(await menuHandoff, { decision: null, reason: 'menu-bar' });
   await until(() => [b, c].every(device => device.last('cancel')?.id === handedOff));
 
+  remoteMenu = true;
+  c.link.close();
+  const remoteMenuDecision = meshes[0].approval(info, 3000, new EventEmitter());
+  await until(() => b.last('approval').id !== handedOff && hubs[2].pending.has(b.last('approval').id));
+  const remoteMenuId = b.last('approval').id;
+  assert.equal(hubs[2].resolveFromMenu(remoteMenuId, 'deny'), true);
+  assert.equal((await remoteMenuDecision).decision, 'deny');
+  await until(() => b.last('cancel')?.id === remoteMenuId);
+  assert.equal(meshes[0].outgoing.has(remoteMenuId), false);
+
   await meshes[2].close();
   const remoteOnly = meshes[0].approval(info, 3000, new EventEmitter());
-  await until(() => b.last('approval').id !== handedOff);
+  await until(() => b.last('approval').id !== remoteMenuId);
   b.decide('allow');
   assert.equal((await remoteOnly).decision, 'allow');
   assert.equal(await meshes[0].notify({ ...info, kind:'done' }), 1);
