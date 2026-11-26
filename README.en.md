@@ -78,6 +78,12 @@ Install with `--agent dsh`, install the Claude Code hooks bridge in your dsh pro
 
 For remote agents over SSH, use `--no-pair` on the remote machine and forward the remote loopback port to the local daemon. See [the protocol guide](docs/protocol.md#ssh-远程-agent).
 
+## macOS menu bar
+
+Run `bash install.sh --menu-bar` from this checkout. Building the menu bar app requires macOS 13 or later and Xcode Command Line Tools. After setup, open **AgentReminder** in Finder under `~/Applications`. The app connects to the local service or starts it for you. Allow Bluetooth access when macOS prompts. On an existing installation, run `bash install.sh --menu-bar --skip-hooks --no-pair` to retain the current hooks and pairing settings.
+
+The bell shows the unread notification and pending approval counts. Open its menu to view either list. Opening a notification marks it as read, and there is also a **Mark all as read** action. The service keeps up to 100 notifications for its current run. To add a device, connect a board with AgentReminder firmware over USB, choose **Pair a new device**, then confirm on the board.
+
 ## FoloToy AI Passport
 
 The AI Passport build is a separate community play. It uses the three function buttons on the right and the same host service. USB enrollment and macOS Bluetooth messaging have been tested on the device. Like the Waveshare build, Passport shows receipt times on approvals, questions, and notifications, and keeps only the latest completion per host, project, and conversation. Installation replaces the active play. [Image, controls, and installation](firmware/release/folotoy-ai-passport/README.md)

@@ -80,6 +80,12 @@ Codex 桌面端通过上述双端配置接入原生问题、MCP 表单及需要�
 
 `bash install.sh --agent dsh` 会生成 dsh 的 hook 文件。dsh 还需要在你的 profile 中安装并配置 Claude Code hooks 桥接。将安装目录内 [Cordis 配置示例](integrations/dsh/cordis.patch.yml) 合并到对应 profile，并把 `configPath` 指向 `~/.agentreminder/dsh-hooks.json` 的绝对路径。桥接使用 `PreToolUse`，其同意行为还受 dsh 自身权限策略约束。
 
+## macOS 菜单栏
+
+在此仓库运行 `bash install.sh --menu-bar`。菜单栏应用需要 macOS 13 或更新版本及 Xcode 命令行工具。安装后，在访达打开「应用程序」中的用户应用目录（`~/Applications`），双击 **AgentReminder**。应用会自动连接或启动本机服务。首次使用蓝牙时，请允许 macOS 的蓝牙访问提示。已有安装可运行 `bash install.sh --menu-bar --skip-hooks --no-pair`，保留现有 hooks 和配对设置。
+
+顶部铃铛旁显示未读通知和待审批数量。点击铃铛可打开通知与审批列表，点开一条通知即标为已读，也可一次标记全部。记录保留在本次服务运行期间，最多 100 条。要添加设备，用 USB 数据线接入已刷固件的设备，在菜单里选择「配对新设备」，再按设备屏幕上的提示确认。
+
 ## FoloToy AI Passport
 
 AI Passport 版是单独的社区玩法，使用右侧三个功能键。它复用同一个电脑端服务，已实测 USB 配对和 macOS 蓝牙收发。和微雪版一样，审批、问题和通知卡显示接收时间，完成通知按主机、项目和对话只保留每组最新一条。安装会替换当前玩法。[玩法镜像、按键和安装说明](firmware/release/folotoy-ai-passport/README.md)

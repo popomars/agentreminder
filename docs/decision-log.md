@@ -121,3 +121,13 @@ peer list, discovered through Tailscale by default. Both peers prove possession
 of the shared key before any card is sent. The source daemon owns the response
 to its agent. Receivers serve cards locally without forwarding them. A separate
 Tailnet listener keeps hook administration and pairing on loopback.
+
+### ADR-0008: Show AgentReminder in the macOS menu bar
+
+- Date: 2026-11-26
+- Status: Accepted
+
+The optional native app starts or connects to the host daemon on loopback.
+The daemon owns unread counts and retains up to 100 notifications in memory
+for its current run. The app uses the existing USB pairing endpoint and the
+same device confirmation as the command-line flow.

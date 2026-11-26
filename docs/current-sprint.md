@@ -20,6 +20,13 @@ notification and approval to physical devices over USB and Bluetooth. Approving
 on the USB device cleared the same card on the Bluetooth device, as confirmed
 on its screen.
 
+Opening the macOS menu bar app starts the local daemon. On a Mac with two
+paired boards, the menu showed two unread notifications and one pending
+approval. Opening a notification reduced the unread count to one, and settling
+the approval on a board cleared the pending count. Re-pairing the Waveshare
+through the menu saved its new key and authenticated a Bluetooth reconnect. The
+Passport enrollment was retained.
+
 See [Chinese setup](../README.md), [English setup](../README.en.md), [protocol](protocol.md), and [progress](progress.md).
 
 The FoloToy branch adds AI Passport community-play and application-only images.

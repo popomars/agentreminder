@@ -187,3 +187,34 @@ test('Claude setup enables the elicitation hook only on supported versions', asy
   assert.match(legacy.Notification[0].matcher, /elicitation_dialog/);
   assert.equal(legacy.PreToolUse[0].matcher, 'AskUserQuestion');
 });
+
+
+test('a custom installation uninstall preserves agent hooks from a different installation', async t => {
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'agentreminder-custom-uninstall-'));
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }));
+  const customState = path.join(home, 'custom-state');
+  const codex = path.join(home, '.codex');
+  fs.mkdirSync(codex);
+  const configPath = path.join(codex, 'hooks.json');
+  const make = state => ({
+    type: 'command', command: `'node' '${state}/app/host/agentreminder.js' hook --agent codex --event stop`,
+  });
+  const existing = make(path.join(home, '.agentreminder'));
+  fs.writeFileSync(configPath, JSON.stringify({ hooks: { Stop: [{ hooks: [existing, make(customState)] }] } }));
+  const env = { ...process.env, HOME: home, CODEX_HOME: codex, AGENTREMINDER_HOME: customState };
+  await run('bash', ['uninstall.sh'], { cwd: root, env });
+  assert.deepEqual(JSON.parse(fs.readFileSync(configPath, 'utf8')), { hooks: { Stop: [{ hooks: [existing] }] } });
+});
+
+
+test('installing the runtime without hooks preserves the existing hook files', async t => {
+  const { state, codex, env } = fixture(t);
+  fs.mkdirSync(codex);
+  const configPath = path.join(codex, 'hooks.json');
+  const existing = '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo existing"}]}]}}';
+  fs.writeFileSync(configPath, existing);
+  await run('bash', ['install.sh', '--skip-hooks', '--no-pair'], { cwd: root, env });
+  assert.equal(fs.readFileSync(configPath, 'utf8'), existing);
+  assert(fs.existsSync(path.join(state, 'app', 'host', 'agentreminder.js')));
+  assert(!fs.existsSync(path.join(state, 'dsh-hooks.json')));
+});
