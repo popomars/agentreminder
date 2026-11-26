@@ -20,7 +20,10 @@ notification and approval to physical devices over USB and Bluetooth. Approving
 on the USB device cleared the same card on the Bluetooth device, as confirmed
 on its screen.
 
-Opening the macOS menu bar app starts the local daemon. On a Mac with two
+The macOS installer places the signed bundle in the user’s Applications folder
+and opens it through Launch Services. The bell starts or connects to the local
+daemon. The menu offers a local test notification and optional Codex Desktop
+approval setup. On a Mac with two
 paired boards, the menu showed two unread notifications and one pending
 approval. Opening a notification reduced the unread count to one, and settling
 the approval on a board cleared the pending count. Re-pairing the Waveshare
@@ -32,6 +35,15 @@ the host, project, conversation, and completion status. Clearing only
 notifications left the pending approval in place. Clearing both reset the two
 counts, withdrew the card from the physical device, and returned the approval
 to its originating client.
+
+The menu notification list retains the latest entry and receipt time per host,
+project, and conversation. Unread counts and clear actions use the displayed
+entries. Clearing an older snapshot cannot clear a replacement notification.
+
+The menu bar uses one entry for firmware setup and updates. Waveshare can be
+flashed before it can pair, while Passport requires its compatible factory
+partition layout. The installer verifies both firmware sets. The daemon keeps
+its inbox and releases the USB port until the flasher exits.
 
 See [Chinese setup](../README.md), [English setup](../README.en.md), [protocol](protocol.md), and [progress](progress.md).
 

@@ -127,9 +127,16 @@ Tailnet listener keeps hook administration and pairing on loopback.
 - Date: 2026-11-26
 - Status: Accepted
 
-The optional native app starts or connects to the host daemon on loopback.
-The daemon owns unread counts and retains up to 100 notifications in memory
-for its current run. The app uses the existing USB pairing endpoint and the
+The macOS installer installs a signed application bundle in the user's
+Applications folder and launches it through Launch Services. The menu can
+run after the installing terminal closes. Upgrades replace the old bell
+without restarting the same-version daemon. The app starts or connects to
+the host daemon on loopback. Headless installations can use
+`--no-menu-bar`. Pairing, firmware and the local delivery test are in
+the bell menu.
+The daemon owns unread counts and retains the latest notification in each
+host, project, and conversation group, up to 100 groups. The app shows the
+latest notification and its reception time. The app uses the existing USB pairing endpoint and the
 same device confirmation as the command-line flow.
 
 ### ADR-0009: Share the ES8311 notification player across boards

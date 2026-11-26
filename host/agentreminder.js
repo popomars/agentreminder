@@ -25,10 +25,12 @@ const { spawn, execFileSync } = require('child_process');
 const bluetooth = require('./bluetooth');
 const tailnet = require('./tailnet');
 
-const VERSION = '0.5.2';
+const VERSION = '0.5.5';
+const UNKNOWN_CONVERSATION = '未命名对话';
 const HOME_DIR = process.env.AGENTREMINDER_HOME || path.join(os.homedir(), '.agentreminder');
 const CONFIG_PATH = path.join(HOME_DIR, 'config.json');
 const LOG_PATH = path.join(HOME_DIR, 'daemon.log');
+const INBOX_HANDOFF_PATH = path.join(HOME_DIR, 'inbox-upgrade.json');
 
 const DEFAULT_CONFIG = {
   httpPort: 47321,              // daemon <-> hook (127.0.0.1 only)
@@ -67,6 +69,15 @@ function registeredDevices(cfg) {
 }
 
 function ensureHome() { fs.mkdirSync(HOME_DIR, { recursive: true }); }
+
+function firmwareUpdateActive() {
+  let pid;
+  try { pid = Number(fs.readFileSync(path.join(HOME_DIR, 'firmware-update.pid'), 'utf8')); }
+  catch (_) { return false; }
+  if (!Number.isSafeInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; }
+  catch (error) { return error.code === 'EPERM'; }
+}
 
 function log(...args) {
   const line = `[${new Date().toISOString()}] ${args.map(a => typeof a === 'string' ? a : JSON.stringify(a)).join(' ')}\n`;
@@ -260,11 +271,28 @@ class Hub {
     return { ...info, host: info.host || hostName, t: 'notify', id: crypto.randomUUID(), ts, receivedTime: cardTime(ts),
       sequence: ++this.notificationSequence };
   }
-  notify(info, payload = this.notificationCard(info)) {
-    if (!this.notifications.has(payload.id)) {
-      this.notifications.set(payload.id, { ...inboxCard(payload), unread: true });
-      if (this.notifications.size > 100) this.notifications.delete(this.notifications.keys().next().value);
+  storeNotification(note) {
+    if (this.notifications.has(note.id)) return;
+    const matching = [...this.notifications.values()].filter(candidate => {
+      if (candidate.host !== note.host || candidate.project !== note.project) return false;
+      if (candidate.sessionId && note.sessionId) return candidate.sessionId === note.sessionId;
+      return Boolean(note.conversation) && note.conversation !== UNKNOWN_CONVERSATION &&
+        candidate.conversation === note.conversation;
+    });
+    const previous = matching.find(candidate => candidate.sessionId === note.sessionId)
+      || (matching.length === 1 ? matching[0] : null);
+    if (previous) {
+      if ((previous.ts ?? 0) > (note.ts ?? 0) ||
+          (previous.ts === note.ts && (previous.sequence ?? 0) > (note.sequence ?? 0))) return;
+      this.notifications.delete(previous.id);
     }
+    this.notifications.set(note.id, note);
+    if (this.notifications.size > 100) this.notifications.delete(this.notifications.keys().next().value);
+  }
+  notify(info, payload = this.notificationCard(info)) {
+    const { ts, sequence } = payload;
+    const sessionId = typeof payload.sessionId === 'string' ? payload.sessionId || undefined : undefined;
+    this.storeNotification({ ...inboxCard(payload), sessionId, ts, sequence, unread: true });
     const links = this.readyLinks();
     for (const link of links) {
       if (info.kind === 'input' && info.reason && link.info.interaction !== true) {
@@ -281,10 +309,12 @@ class Hub {
 function startUsb(hub, cfg) {
   if (!cfg.usb.enabled) return;
   const open = new Map();                // path -> Link
+  const serialStreams = new Set();
   const cooldown = new Map();            // path -> until (ms)
   const res = cfg.usb.patterns.map(p => new RegExp(p));
 
   const scan = () => {
+    if (firmwareUpdateActive()) return;
     let names = [];
     try { names = fs.readdirSync('/dev'); } catch (_) { return; }
     for (const n of names) {
@@ -305,7 +335,16 @@ function startUsb(hub, cfg) {
     try { fd = fs.openSync(p, fs.constants.O_RDWR | fs.constants.O_NOCTTY); }
     catch (e) { cooldown.set(p, Date.now() + 15000); return; }
     // tty.ReadStream gives event-driven, non-blocking reads on a serial fd.
-    const rs = new tty.ReadStream(fd);
+    let rs;
+    try { rs = new tty.ReadStream(fd); }
+    catch (_) { fs.closeSync(fd); cooldown.set(p, Date.now() + 15000); return; }
+    // libuv may reopen the terminal and leave the original write fd to us.
+    const closeWriteFd = rs._handle.fd !== fd;
+    serialStreams.add(rs);
+    rs.once('close', () => {
+      if (closeWriteFd) fs.closeSync(fd);
+      serialStreams.delete(rs);
+    });
     try { rs.setRawMode(true); } catch (_) { /* stty already did it */ }
     const write = (str) => {
       const buf = Buffer.from(str);
@@ -331,6 +370,15 @@ function startUsb(hub, cfg) {
   setInterval(scan, 3000).unref?.();
   // Detect unplug: device file disappears.
   setInterval(() => { for (const [p, l] of open) if (!fs.existsSync(p)) l.close(); }, 2000).unref?.();
+  return {
+    async pauseForFirmware() {
+      const closed = [...serialStreams].map(stream =>
+        new Promise(resolve => stream.once('close', resolve)));
+      for (const link of open.values()) link.close();
+      cooldown.clear();
+      await Promise.all(closed);
+    },
+  };
 }
 
 /* ----------------------------- Wi-Fi TCP ---------------------------- */
@@ -396,6 +444,7 @@ function savePairingConfig(usb, device) {
 }
 
 function runDaemon() {
+  if (firmwareUpdateActive()) throw new Error("A firmware update is already in progress.");
   ensureHome();
   const cfg = loadConfig();
   const hub = new Hub(cfg);
@@ -404,7 +453,7 @@ function runDaemon() {
     try { mesh = tailnet.createMesh(tailnet.validateConfig(cfg.tailnet), hub, log); }
     catch (error) { meshConfigError = error.message; log(meshConfigError); }
   }
-  let ble;
+  let ble, usb;
 
   const prompted = new WeakSet();
   async function pairUsb(response, selected) {
@@ -447,20 +496,20 @@ function runDaemon() {
     const reply = (code, obj) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)); };
     try {
       if (req.headers.origin) return reply(403, { error: 'browser requests are not supported' });
-      if (req.url === '/inbox' || req.url === '/inbox/read' || req.url === '/inbox/clear') {
+      if (req.url === '/inbox' || req.url === '/inbox/read' || req.url === '/inbox/clear' || req.url === '/inbox/test' || req.url === '/firmware/prepare') {
         if (!/^(127\.0\.0\.1|localhost)(:\d+)?$/i.test(req.headers.host || '')) {
-          return reply(403, { error: 'inbox requires a loopback host' });
+          return reply(403, { error: 'endpoint requires a loopback host' });
         }
         res.setHeader('Cache-Control', 'no-store');
       }
       if (req.method === 'GET' && req.url === '/inbox') {
-        const notifications = [...hub.notifications.values()].reverse();
+        const notifications = [...hub.notifications.values()].reverse().sort((a, b) => (b.ts ?? 0) - (a.ts ?? 0));
         const approvals = new Map();
         for (const { payload, target } of hub.pending.values()) {
           if (!target) approvals.set(payload.id, payload);
         }
         for (const [id, { card }] of mesh?.outgoing || []) approvals.set(id, card);
-        return reply(200, { canClear: true, notifications, unread: notifications.filter(note => note.unread).length,
+        return reply(200, { canClear: true, canUpdateFirmware: true, canSendTest: true, groupsNotifications: true, notifications, unread: notifications.filter(note => note.unread).length,
           approvals: [...approvals.values()].map(inboxCard),
           devices: new Set(hub.readyLinks().map(link => link.info.id)).size });
       }
@@ -499,13 +548,27 @@ function runDaemon() {
         }
         return reply(200, { ok: true });
       }
+      if (req.url === '/inbox/test') {
+        const english = body.lang === 'en';
+        const delivered = hub.notify({ agent: 'test', kind: 'test', project: 'AgentReminder',
+          sessionId: 'agentreminder-menu-test', conversation: english ? 'Connection test' : '连接测试',
+          title: english ? 'Test notification' : '测试通知',
+          detail: english ? 'AgentReminder received your test notification.' : 'AgentReminder 已收到测试通知。' });
+        return reply(200, { delivered });
+      }
+      if (req.url === '/firmware/prepare') {
+        if (!firmwareUpdateActive()) return reply(409, { error: 'firmware-update-inactive' });
+        if (hub.pending.size || mesh?.outgoing.size) return reply(409, { error: 'approval-pending' });
+        await usb?.pauseForFirmware();
+        return reply(200, { ok: true });
+      }
       if (req.url === '/pair' || req.url === '/setup-usb') {
         if (req.url === '/setup-usb') {
           if (!hub.pairings().size) {
             savePairingConfig({ enabled: true, autoPair: true });
             if (!cfg.usb.enabled) {
               cfg.usb.enabled = true;
-              startUsb(hub, cfg);
+              usb = startUsb(hub, cfg);
             }
             cfg.usb.autoPair = true;
           }
@@ -546,9 +609,16 @@ function runDaemon() {
   server.listen(cfg.httpPort, '127.0.0.1', () => {
     log(`daemon ${VERSION} listening on 127.0.0.1:${cfg.httpPort} pid=${process.pid}`);
     try { fs.writeFileSync(path.join(HOME_DIR, 'daemon.pid'), String(process.pid)); } catch (_) { /* ignore */ }
+    try {
+      const notifications = JSON.parse(fs.readFileSync(INBOX_HANDOFF_PATH, 'utf8'));
+      for (const note of notifications.slice(0, 100).reverse()) hub.storeNotification(note);
+      fs.unlinkSync(INBOX_HANDOFF_PATH);
+    } catch (error) {
+      if (error.code !== 'ENOENT') log('could not restore inbox after upgrade', error.message);
+    }
     // Only the process that owns the HTTP port may open the device transports.
     ble = bluetooth.startBluetooth(hub, Link, log);
-    startUsb(hub, cfg);
+    usb = startUsb(hub, cfg);
     startWifi(hub, cfg);
     mesh?.start();
     setInterval(() => {
@@ -626,6 +696,7 @@ function spawnDaemon() {
 
 async function ensureDaemon() {
   try { await call('GET', '/status', null, 800); return true; } catch (_) { /* start it */ }
+  if (firmwareUpdateActive()) return false;
   spawnDaemon();
   // Give the paired board time to reconnect on the first request after startup.
   const hasBluetoothPairing = [...registeredDevices(loadConfig()).values()].some(device => device.key);
@@ -648,8 +719,19 @@ async function preparePairing(autoSetup = false) {
       throw new Error('请在设备连接的电脑更新 AgentReminder 守护进程后再配对。');
     }
     if (status.pending.length) throw new Error('请先处理当前审批，再重新运行配对。');
+    const inbox = await call('GET', '/inbox', null, 800);
+    let saved = false;
+    if (inbox.notifications?.length) {
+      const temporary = INBOX_HANDOFF_PATH + '.' + process.pid;
+      fs.writeFileSync(temporary, JSON.stringify(inbox.notifications), { mode: 0o600 });
+      fs.renameSync(temporary, INBOX_HANDOFF_PATH);
+      saved = true;
+    }
     const shutdown = await call('POST', '/shutdown', {}, 1000);
-    if (!shutdown.ok) throw new Error('无法重启本机 AgentReminder 守护进程。');
+    if (!shutdown.ok) {
+      if (saved) fs.unlinkSync(INBOX_HANDOFF_PATH);
+      throw new Error('无法重启本机 AgentReminder 守护进程。');
+    }
     for (let attempt = 0; attempt < 20 && status; attempt++) {
       await new Promise(resolve => setTimeout(resolve, 150));
       status = await call('GET', '/status', null, 500).catch(() => null);
@@ -765,7 +847,7 @@ function describeSession(input, agent, fallbackCwd = '') {
   const title = explicit || thread.title || transcriptTitle(input.transcript_path, sessionId);
   return {
     sessionId: clip(sessionId, 128),
-    conversation: clip(String(title || (sessionId ? `对话 ${sessionId.slice(0, 8)}` : '未命名对话')).replace(/\s+/g, ' ').trim(), 100),
+    conversation: clip(String(title || (sessionId ? `对话 ${sessionId.slice(0, 8)}` : UNKNOWN_CONVERSATION)).replace(/\s+/g, ' ').trim(), 100),
     host: hostName,
     project: clip(path.basename(cwd || thread.cwd || fallbackCwd), 80),
   };
@@ -979,6 +1061,14 @@ async function main() {
     case 'pair': return pairDevice();
     case 'setup-usb': return setupUsb();
     case 'menu-start': return preparePairing();
+    case 'firmware-prepare': {
+      const result = await call('POST', '/firmware/prepare', {}, 2000);
+      if (result.error === 'approval-pending') {
+        throw new Error(rest.includes('en') ? 'Finish pending approvals or pairing before updating firmware.' : '请先处理待审批或配对请求，再更新固件。');
+      }
+      if (!result.ok) throw new Error(rest.includes('en') ? 'The service could not release USB.' : '服务未能释放 USB 串口。');
+      return;
+    }
     case 'start': {
       const ok = await ensureDaemon();
       console.log(ok ? 'daemon running' : 'daemon failed, see ' + LOG_PATH);

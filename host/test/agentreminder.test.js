@@ -126,6 +126,37 @@ test('when the agent runs on a remote host, card metadata preserves its source',
   await request.promise;
 });
 
+test('inbox keeps the latest notification per host, project and conversation', () => {
+  const hub = new Hub({});
+  const notify = (id, ts, extra = {}) => {
+    const note = {
+      id, ts, sequence: 1, t: 'notify', kind: 'done', title: id,
+      host: 'Host A', project: 'Project A', conversation: 'Chat A', sessionId: 'chat-a',
+      receivedTime: ts === 1000 ? '11-26 13:01' : '11-26 13:02',
+      ...extra,
+    };
+    hub.notify(note, note);
+  };
+
+  notify('first', 1000);
+  notify('latest', 2000, { conversation: 'Chat renamed', sequence: 2 });
+  notify('older-with-late-delivery', 1000);
+  notify('earlier-in-same-millisecond', 2000);
+  notify('another-host', 2000, { host: 'Host B' });
+  notify('another-project', 2000, { project: 'Project B' });
+  notify('same-title-distinct-chat', 2000, { sessionId: 'chat-b', conversation: 'Chat renamed' });
+  notify('unnamed-a', 2000, { sessionId: '', conversation: '未命名对话' });
+  notify('unnamed-b', 2000, { sessionId: '', conversation: '未命名对话' });
+  notify('legacy-title-only', 2000, { sessionId: '', conversation: 'Chat renamed' });
+  notify('legacy-title-latest', 2000, { sessionId: '', conversation: 'Chat renamed', sequence: 2 });
+
+  assert.deepEqual([...hub.notifications.keys()], [
+    'latest', 'another-host', 'another-project', 'same-title-distinct-chat', 'unnamed-a', 'unnamed-b', 'legacy-title-latest',
+  ]);
+  assert.equal(hub.notifications.get('latest').conversation, 'Chat renamed');
+  assert.equal(hub.notifications.get('latest').receivedTime, '11-26 13:02');
+});
+
 test('USB pairing confirmation reaches only the selected link and locks future cards to that device', async () => {
   const cfg = { usb: {} };
   const hub = new Hub(cfg);

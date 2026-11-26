@@ -5,8 +5,10 @@ umask 077
 repo=popomars/agentreminder
 ref=main
 use_checkout=true
+platform=$(uname -s)
 pair=true
 menu_bar=false
+if [[ "$platform" == Darwin ]]; then menu_bar=true; fi
 install_hooks=true
 flash=false
 board=
@@ -16,8 +18,8 @@ lang=zh
 agents=()
 say() { if [[ "$lang" == en ]]; then printf '%s\n' "$2"; else printf '%s\n' "$1"; fi; }
 usage() {
-  say '用法：bash install.sh [--agent codex|claude|dsh] [--ref REF] [--flash [--board waveshare-amoled-2.16|folotoy-passport] [--port DEVICE] [--baud RATE]] [--menu-bar] [--skip-hooks] [--no-pair] [--lang zh|en]' \
-      'Usage: bash install.sh [--agent codex|claude|dsh] [--ref REF] [--flash [--board waveshare-amoled-2.16|folotoy-passport] [--port DEVICE] [--baud RATE]] [--menu-bar] [--skip-hooks] [--no-pair] [--lang zh|en]'
+  say '用法：bash install.sh [--agent codex|claude|dsh] [--ref REF] [--flash [--board waveshare-amoled-2.16|folotoy-passport] [--port DEVICE] [--baud RATE]] [--menu-bar|--no-menu-bar] [--skip-hooks] [--no-pair] [--lang zh|en]' \
+      'Usage: bash install.sh [--agent codex|claude|dsh] [--ref REF] [--flash [--board waveshare-amoled-2.16|folotoy-passport] [--port DEVICE] [--baud RATE]] [--menu-bar|--no-menu-bar] [--skip-hooks] [--no-pair] [--lang zh|en]'
 }
 while (( $# )); do
   case "$1" in
@@ -36,6 +38,7 @@ while (( $# )); do
     --baud) [[ ${2:-} =~ ^[0-9]+$ ]] || { usage >&2; exit 2; }; flash_baud=$2; shift 2;;
     --lang) case "${2:-}" in zh|en) lang=$2;; *) usage >&2; exit 2;; esac; shift 2;;
     --menu-bar) menu_bar=true; shift;;
+    --no-menu-bar) menu_bar=false; shift;;
     --skip-hooks) install_hooks=false; shift;;
     --no-pair) pair=false; shift;;
     -h|--help) usage; exit 0;;
@@ -43,60 +46,73 @@ while (( $# )); do
   esac
 done
 
-case "$(uname -s)" in Darwin|Linux) ;; *) say '目前安装脚本支持 macOS 和 Linux。' 'The installer supports macOS and Linux.' >&2; exit 1;; esac
+case "$platform" in Darwin|Linux) ;; *) say '目前安装脚本支持 macOS 和 Linux。' 'The installer supports macOS and Linux.' >&2; exit 1;; esac
 command -v node >/dev/null && node -e 'process.exit(+process.versions.node.split(".")[0] < 18 ? 1 : 0)' || {
   say '请先安装 Node.js 18 或更新版本。' 'Install Node.js 18 or newer first.' >&2
   exit 1
 }
 if "$menu_bar"; then
-  if [[ "$(uname -s)" != Darwin ]] || (( $(sw_vers -productVersion | cut -d. -f1) < 13 )) ||
+  if [[ "$platform" != Darwin ]] || (( $(sw_vers -productVersion | cut -d. -f1) < 13 )) ||
      ! xcrun --find swiftc >/dev/null 2>&1; then
-    say '菜单栏应用需要 macOS 13 或更新版本及 Xcode 命令行工具。' 'The menu bar app requires macOS 13 or later and Xcode Command Line Tools.' >&2
+    say '菜单栏应用需要 macOS 13 或更新版本及 Xcode 命令行工具。仅安装后台程序可加 --no-menu-bar。' \
+        'The menu bar app requires macOS 13 or later and Xcode Command Line Tools. For a headless install, add --no-menu-bar.' >&2
     exit 1
   fi
 fi
-if "$flash"; then
-  command -v python3 >/dev/null || { say '刷机需要 Python 3。' 'Flashing requires Python 3.' >&2; exit 1; }
-elif [[ -n "$board$flash_port$flash_baud" ]]; then
+if "$flash" || "$menu_bar"; then
+  command -v python3 >/dev/null && python3 -c "import hashlib, venv" || { say '刷机需要 Python 3。' 'Flashing requires Python 3.' >&2; exit 1; }
+fi
+if ! "$flash" && [[ -n "$board$flash_port$flash_baud" ]]; then
   usage >&2
   exit 2
 fi
 
 if "$install_hooks" && (( ${#agents[@]} == 0 )); then
-  if command -v codex >/dev/null || [[ -d ${CODEX_HOME:-"$HOME/.codex"} || -x "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex" ]]; then agents+=(codex); fi
+  if command -v codex >/dev/null || [[ -d ${CODEX_HOME:-"$HOME/.codex"} ||
+    -x "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex" ||
+    -x "$HOME/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex" ]]; then agents+=(codex); fi
   if command -v claude >/dev/null || [[ -d "$HOME/.claude" ]]; then agents+=(claude); fi
   if command -v dsh >/dev/null; then agents+=(dsh); fi
 fi
 if "$install_hooks" && (( ${#agents[@]} == 0 )); then
-  say '未找到 agent。请使用 --agent codex、--agent claude 或 --agent dsh。' \
-      'No agent detected. Pass --agent codex, --agent claude, or --agent dsh.' >&2
-  exit 1
+  say '未找到 agent。安装 agent 后可用 --agent codex、--agent claude 或 --agent dsh 配置 hooks。' \
+      'No agent detected. After installing one, rerun with --agent codex, --agent claude, or --agent dsh to set up its hooks.' >&2
+  if ! "$menu_bar"; then exit 1; fi
 fi
 
 install_dir="${AGENTREMINDER_HOME:-"$HOME/.agentreminder"}/app"
 mkdir -p "$install_dir/host/tools" "$install_dir/integrations/dsh"
 stage="$(mktemp -d "$install_dir/.install.XXXXXXXX")"
-trap 'rm -rf "$stage"' EXIT
+menu_stage=
+trap 'rm -rf "$stage"; if [[ -n "$menu_stage" && ! -e "$menu_stage/previous.app" && ! -L "$menu_stage/previous.app" ]]; then rm -rf "$menu_stage"; fi' EXIT
 source_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 sha=
 files=(uninstall.sh host/uninstall.js host/agentreminder.js host/bluetooth.js host/codex-approval-proxy.js host/codex-approval-cli host/open-codex.sh host/configure-codex-dock.js
   host/tools/hardware-check.js integrations/dsh/cordis.patch.yml)
-if "$flash"; then
-  if [[ "$board" == folotoy-passport ]]; then
-    firmware_dir=firmware/release/folotoy-ai-passport
-    firmware_files=(AgentReminder-AI-Passport-app.bin AgentReminder-AI-Passport-full.bin)
-    board_args=(--board "$board")
-  else
-    firmware_dir=firmware/release/waveshare-amoled-2.16
-    firmware_files=(bootloader.bin partitions.bin boot_app0.bin firmware.bin)
-    # The default also works with flash.sh from older refs.
-    board_args=()
+add_firmware() {
+  local firmware_id=$1
+  shift
+  local firmware_dir="firmware/release/$firmware_id"
+  files+=("$firmware_dir/SHA256SUMS")
+  local image
+  for image in "$@"; do files+=("$firmware_dir/$image"); done
+}
+if "$flash" || "$menu_bar"; then
+  files+=(flash.sh)
+  if "$menu_bar" || [[ "$board" != folotoy-passport ]]; then
+    add_firmware waveshare-amoled-2.16 bootloader.bin partitions.bin boot_app0.bin firmware.bin
   fi
-  files+=(flash.sh "$firmware_dir/SHA256SUMS")
-  for file in "${firmware_files[@]}"; do files+=("$firmware_dir/$file"); done
-  mkdir -p "$install_dir/$firmware_dir"
+  if "$menu_bar" || [[ "$board" == folotoy-passport ]]; then
+    add_firmware folotoy-ai-passport AgentReminder-AI-Passport-app.bin AgentReminder-AI-Passport-full.bin
+  fi
 fi
-if [[ "$(uname -s)" == Darwin ]]; then
+if [[ "$board" == folotoy-passport ]]; then
+  board_args=(--board "$board")
+else
+  # The default also works with flash.sh from older refs.
+  board_args=()
+fi
+if [[ "$platform" == Darwin ]]; then
   files+=(host/bluetooth/agentreminder-bluetooth)
   mkdir -p "$install_dir/host/bluetooth"
 fi
@@ -107,9 +123,6 @@ if "$use_checkout" && [[ -f "$source_dir/host/agentreminder.js" && "$source_dir"
   done
 else
   github_token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
-  if [[ -z "$github_token" ]] && command -v gh >/dev/null; then
-    github_token="$(gh auth token 2>/dev/null || true)"
-  fi
   github_get() {
     local endpoint=$1 media=$2
     if [[ -n "$github_token" ]]; then
@@ -120,9 +133,14 @@ else
     fi
   }
   sha="$(github_get "commits/$ref" application/vnd.github.sha)" || {
-    say '请设置有仓库读取权限的 GH_TOKEN，或通过 gh auth login 登录后重试。' \
-        'Set GH_TOKEN with repository read access, or sign in with gh auth login and retry.' >&2
-    exit 1
+    if [[ -z "$github_token" ]] && command -v gh >/dev/null; then
+      github_token="$(gh auth token 2>/dev/null || true)"
+    fi
+    if [[ -z "$github_token" ]] || ! sha="$(github_get "commits/$ref" application/vnd.github.sha)"; then
+      say '无法读取 GitHub 提交。请检查网络和版本号。需要认证时，设置 GH_TOKEN 后重试。' \
+          'Could not read the GitHub revision. Check the network and ref, or set GH_TOKEN if authentication is required.' >&2
+      exit 1
+    fi
   }
   if [[ ! $sha =~ ^[a-f0-9]{40}$ ]]; then say 'GitHub 没有返回有效的提交 SHA。' 'GitHub did not return a valid commit SHA.' >&2; exit 1; fi
   for file in "${files[@]}"; do
@@ -151,19 +169,45 @@ if "$menu_bar"; then
     fi
   done
   menu_app=AgentReminder.app
+  legacy_menu="$(cd "$install_dir" && pwd -P)/$menu_app"
+  menu_path="$legacy_menu"
+  if [[ -z ${AGENTREMINDER_HOME:-} ]]; then
+    mkdir -p "$HOME/Applications"
+    menu_path="$(cd "$HOME/Applications" && pwd -P)/$menu_app"
+  fi
+  if [[ -L "$menu_path" ]]; then
+    node -e '
+      const fs = require("node:fs"), path = require("node:path");
+      const [link, expected] = process.argv.slice(1);
+      const target = path.resolve(path.dirname(link), fs.readlinkSync(link));
+      const canonical = path.join(fs.realpathSync(path.dirname(target)), path.basename(target));
+      if (canonical !== expected) process.exit(1);
+    ' "$menu_path" "$legacy_menu" 2>/dev/null || {
+      say "已有其他应用程序链接：$menu_path" "Another app link already exists at $menu_path." >&2
+      exit 1
+    }
+  elif [[ -e "$menu_path" ]]; then
+    if [[ "$(/usr/libexec/PlistBuddy -c 'Print CFBundleIdentifier' "$menu_path/Contents/Info.plist" 2>/dev/null || true)" != io.github.popomars.agentreminder.menu ]] ||
+       ! node -e 'const c = require(process.argv[1]); if (c.statePath !== process.argv[2]) process.exit(1)' \
+         "$menu_path/Contents/Resources/Installation.json" "$(cd "$install_dir/.." && pwd -P)" 2>/dev/null; then
+      say "已有其他应用程序：$menu_path" "Another app already exists at $menu_path." >&2
+      exit 1
+    fi
+  fi
   menu_contents="$stage/$menu_app/Contents"
   mkdir -p "$menu_contents/MacOS" "$menu_contents/Resources"
   cp "$stage/menu-bar/Info.plist" "$menu_contents/Info.plist"
   xcrun swiftc -O -parse-as-library -target "$(uname -m)-apple-macos13" -module-cache-path "$stage/swift-cache" \
     "$stage/menu-bar/Main.swift" -o "$menu_contents/MacOS/AgentReminder"
-  node - "$install_dir" "$lang" > "$menu_contents/Resources/Installation.json" <<'JS'
+  node - "$(cd "$install_dir" && pwd -P)" "$lang" "$(command -v node)" "$(command -v python3)" > "$menu_contents/Resources/Installation.json" <<'JS'
 const path = require('node:path');
-const [installDir, language] = process.argv.slice(2);
-console.log(JSON.stringify({ node: process.execPath, statePath: path.resolve(installDir, '..'), language }));
+const [installDir, language, node, python] = process.argv.slice(2);
+console.log(JSON.stringify({
+  node: path.resolve(node), python: path.resolve(python), statePath: path.resolve(installDir, '..'), language,
+}));
 JS
   codesign --sign - "$stage/$menu_app"
-  files+=("$menu_app/Contents/Info.plist" "$menu_app/Contents/MacOS/AgentReminder"
-    "$menu_app/Contents/Resources/Installation.json" "$menu_app/Contents/_CodeSignature/CodeResources")
+  codesign --verify --strict "$stage/$menu_app"
 fi
 unset github_token
 node --check "$stage/host/agentreminder.js"
@@ -172,7 +216,10 @@ node --check "$stage/host/bluetooth.js"
 node --check "$stage/host/codex-approval-proxy.js"
 node --check "$stage/host/configure-codex-dock.js"
 node --check "$stage/host/tools/hardware-check.js"
-if "$flash"; then
+if "$menu_bar"; then
+  AGENTREMINDER_LANG="$lang" bash "$stage/flash.sh" --check --board waveshare-amoled-2.16
+  AGENTREMINDER_LANG="$lang" bash "$stage/flash.sh" --check --board folotoy-passport
+elif "$flash"; then
   AGENTREMINDER_LANG="$lang" bash "$stage/flash.sh" --check ${board_args[@]+"${board_args[@]}"}
 fi
 for file in "${files[@]}"; do
@@ -180,7 +227,7 @@ for file in "${files[@]}"; do
   mv "$stage/$file" "$install_dir/$file"
 done
 chmod 700 "$install_dir/uninstall.sh" "$install_dir/host/codex-approval-cli" "$install_dir/host/open-codex.sh"
-if [[ "$(uname -s)" == Darwin ]]; then chmod 700 "$install_dir/host/bluetooth/agentreminder-bluetooth"; fi
+if [[ "$platform" == Darwin ]]; then chmod 700 "$install_dir/host/bluetooth/agentreminder-bluetooth"; fi
 
 host="$install_dir/host/agentreminder.js"
 if "$flash"; then
@@ -205,31 +252,47 @@ run_host() {
 if "$install_hooks"; then
   for agent in "${agents[@]}"; do run_host install "$agent"; done
 fi
-if "$pair"; then
+if "$pair" && ! "$menu_bar"; then
   run_host setup-usb
   if [[ "$lang" == en ]]; then echo 'Connect the board by USB. Follow the prompt on its screen to confirm.'; fi
 fi
 
 if "$menu_bar"; then
-  menu_path="$(cd "$install_dir" && pwd)/$menu_app"
-  if [[ -z ${AGENTREMINDER_HOME:-} ]]; then
-    mkdir -p "$HOME/Applications"
-    shortcut="$HOME/Applications/$menu_app"
-    if [[ ! -e "$shortcut" && ! -L "$shortcut" ]]; then ln -s "$menu_path" "$shortcut"; fi
-    if [[ -L "$shortcut" && "$(readlink "$shortcut")" == "$menu_path" ]]; then menu_path="$shortcut"; fi
+  menu_stage="$(mktemp -d "$(dirname "$menu_path")/.agentreminder-install.XXXXXXXX")"
+  /usr/bin/ditto "$stage/$menu_app" "$menu_stage/$menu_app"
+  codesign --verify --strict "$menu_stage/$menu_app"
+  if [[ -e "$menu_path" || -L "$menu_path" ]]; then mv "$menu_path" "$menu_stage/previous.app"; fi
+  if ! mv "$menu_stage/$menu_app" "$menu_path"; then
+    if [[ -e "$menu_stage/previous.app" || -L "$menu_stage/previous.app" ]]; then
+      mv "$menu_stage/previous.app" "$menu_path"
+    fi
+    exit 1
   fi
-  say "在访达双击 $menu_path 即可启动菜单栏服务。" "Open $menu_path in Finder to start AgentReminder."
+  rm -rf "$menu_stage/previous.app"
+  launch_args=(--replace-existing)
+  if "$pair"; then launch_args+=(--setup-usb); fi
+  if open -n "$menu_path" --args "${launch_args[@]}"; then
+    say '请从菜单栏的 AgentReminder 铃铛开始配对或发送测试通知。' 'Open the AgentReminder bell in the menu bar to pair a device or send a test notification.'
+    say "应用程序：$menu_path" "Application: $menu_path"
+  else
+    say "未能自动启动菜单栏应用。登录 macOS 桌面后打开 $menu_path。" \
+        "The menu bar app could not open automatically. After signing in to macOS, open $menu_path." >&2
+    exit 1
+  fi
 fi
 
 say "AgentReminder 已安装到 $install_dir" "AgentReminder is installed in $install_dir"
-say "查看连接状态：node \"$host\" status" "Check connection: node \"$host\" status"
+if ! "$menu_bar"; then
+  say "查看连接状态：node \"$host\" status" "Check connection: node \"$host\" status"
+  if ! "$pair"; then say "连接设备后配对：node \"$host\" pair" "Pair after connecting by USB: node \"$host\" pair"; fi
+fi
 say "卸载主机服务：bash \"$install_dir/uninstall.sh\"" "Uninstall: bash \"$install_dir/uninstall.sh\" --lang en"
-if ! "$pair"; then say "连接设备后配对：node \"$host\" pair" "Pair after connecting by USB: node \"$host\" pair"; fi
 for agent in ${agents[@]+"${agents[@]}"}; do
   if [[ "$agent" == dsh ]]; then
     say "dsh 需安装 Claude Code hooks 桥接，并将示例合并到所用 profile：$install_dir/integrations/dsh/cordis.patch.yml" \
         "For dsh, install the Claude Code hooks bridge and merge this example into your profile: $install_dir/integrations/dsh/cordis.patch.yml"
-  elif [[ "$agent" == codex && "$lang" == en ]]; then
-    echo 'In Codex, use /hooks to review and trust AgentReminder hooks.'
+  elif [[ "$agent" == codex ]]; then
+    say '重开 Codex，并用 /hooks 审核及信任 AgentReminder 的 hooks。' \
+        'Reopen Codex and use /hooks to review and trust AgentReminder hooks.'
   fi
 done
