@@ -80,6 +80,10 @@ Codex 桌面端通过上述双端配置接入原生问题、MCP 表单及需要�
 
 `bash install.sh --agent dsh` 会生成 dsh 的 hook 文件。dsh 还需要在你的 profile 中安装并配置 Claude Code hooks 桥接。将安装目录内 [Cordis 配置示例](integrations/dsh/cordis.patch.yml) 合并到对应 profile，并把 `configPath` 指向 `~/.agentreminder/dsh-hooks.json` 的绝对路径。桥接使用 `PreToolUse`，其同意行为还受 dsh 自身权限策略约束。
 
+## 微雪通知音
+
+微雪 ESP32-S3-Touch-AMOLED-2.16 收到新的审批、问题或通知时，板载扬声器响两声短提示音。同一张卡经 USB 和蓝牙送达时合并为一组提示音，连续通知共用 1 秒的播放间隔。
+
 ## FoloToy AI Passport
 
 AI Passport 版是单独的社区玩法，使用右侧三个功能键。它复用同一个电脑端服务，已实测 USB 配对和 macOS 蓝牙收发。和微雪版一样，审批、问题和通知卡显示接收时间，完成通知按主机、项目和对话只保留每组最新一条。安装会替换当前玩法。[玩法镜像、按键和安装说明](firmware/release/folotoy-ai-passport/README.md)

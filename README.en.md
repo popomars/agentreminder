@@ -78,6 +78,10 @@ Install with `--agent dsh`, install the Claude Code hooks bridge in your dsh pro
 
 For remote agents over SSH, use `--no-pair` on the remote machine and forward the remote loopback port to the local daemon. See [the protocol guide](docs/protocol.md#ssh-远程-agent).
 
+## Waveshare notification sound
+
+The Waveshare ESP32-S3-Touch-AMOLED-2.16 plays two short beeps for new approvals, questions, and notifications. The device combines duplicate USB and Bluetooth deliveries and plays at most one pair of beeps per second.
+
 ## FoloToy AI Passport
 
 The AI Passport build is a separate community play. It uses the three function buttons on the right and the same host service. USB enrollment and macOS Bluetooth messaging have been tested on the device. Like the Waveshare build, Passport shows receipt times on approvals, questions, and notifications, and keeps only the latest completion per host, project, and conversation. Installation replaces the active play. [Image, controls, and installation](firmware/release/folotoy-ai-passport/README.md)

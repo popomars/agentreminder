@@ -67,3 +67,21 @@ images and keeps pairing data.
 Host v0.4.5 keeps multiple enrollments in one daemon. Automated tests cover
 two paired boards receiving the same message and the first decision clearing
 both cards. Passport has also reconnected to this version of the main daemon.
+
+Waveshare uses the shared ES8311 chime for new cards and controls its
+onboard speaker amplifier during playback. The listener heard v0.3.7 in an
+isolated USB test. Waveshare v0.3.8 keeps the 80 ms amplifier wake delay and
+uses a quieter 140 ms cue with a gentler envelope. The board reconnected over
+USB and Bluetooth and reported playback for both isolated USB test cards.
+Waveshare v0.3.9 lowers the PCM peak by about 3 dB while retaining the cue
+length and envelope. It was flashed and logged one isolated USB playback.
+Waveshare v0.3.10 halves the PCM amplitude again and passes an isolated USB
+playback test.
+Waveshare v0.3.12 uses two 40 ms tones separated by 120 ms. The first tone
+starts after 70 ms of silence following DAC unmute. The listener heard both
+tones during an isolated USB test.
+Waveshare v0.3.13 reduces each tone to 30 ms and its PCM peak by about 2 dB.
+An isolated USB test logged playback on the board.
+Waveshare v0.3.15 reduces the PCM peak to 1500 after a further volume
+reduction, keeps the two 30 ms tones and passes an isolated USB playback test.
+The listener approved this cue after a Waveshare-only replay.

@@ -8,10 +8,10 @@
 #include <ArduinoJson.h>
 #include "ui.h"
 #include "ble_transport.h"
+#include "notification_sound.h"
 
 #ifdef AGENTREMINDER_PASSPORT
 #include <nvs_flash.h>
-#include "passport_sound.h"
 
 // Arduino reformats default NVS on two initialization errors. A Passport may
 // still need that data for the previous play, so keep it and leave BLE unpaired.
@@ -26,7 +26,7 @@ static constexpr size_t usbRxBuffer = 4096;
 static constexpr char fwVersion[] = "0.3.20";
 #else
 static constexpr size_t usbRxBuffer = 16384;
-static constexpr char fwVersion[] = "0.3.5";
+static constexpr char fwVersion[] = "0.3.15";
 static constexpr uint16_t tcpPort = 47322;
 static WiFiServer server(tcpPort);
 static WiFiClient client;
@@ -104,9 +104,9 @@ static void handle(const String &line, uint8_t ch) {
     r["ble"] = 1; r["ble_paired"] = ble_paired();
     r["interaction"] = true;
     r["font_ok"] = ui_font_ok();
+    r["sound"] = notification_sound_enabled();
 #ifdef AGENTREMINDER_PASSPORT
     r["board"] = "folotoy-passport";
-    r["sound"] = passport_sound_enabled();
     r["orientation"] = ui_passport_landscape() ? "landscape" : "portrait";
 #else
     if (WiFi.status() == WL_CONNECTED) r["ip"] = WiFi.localIP().toString();

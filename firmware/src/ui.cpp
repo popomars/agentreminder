@@ -1,9 +1,9 @@
 // LVGL UI: approval card with 拒绝 / 终端 / 同意, otherwise a list of recent notifications.
 #include "ui.h"
+#include "notification_sound.h"
 #ifdef AGENTREMINDER_PASSPORT
 #include "board_passport.h"
 #include "passport_keys.h"
-#include "passport_sound.h"
 #include <Preferences.h>
 #else
 #include "board_config.h"
@@ -299,7 +299,7 @@ static void passportKeyCue(PassportKey key, const char *text, uint32_t color, bo
 
 #ifdef AGENTREMINDER_PASSPORT
 static const char *passportSoundText() {
-  return passport_sound_enabled() ? "提示音：开" : "提示音：关";
+  return notification_sound_enabled() ? "提示音：开" : "提示音：关";
 }
 
 static void buildPassportLandscapeIdle(lv_obj_t *body, const String &host) {
@@ -549,9 +549,8 @@ static void rebuild(bool force = false) {
 void ui_init() {
 #ifndef AGENTREMINDER_PASSPORT
   denyKey.init(); allowKey.init();
-#else
-  passport_sound_init();
 #endif
+  notification_sound_init();
   lcd.init();
 #ifdef AGENTREMINDER_PASSPORT
   Preferences prefs;
@@ -668,7 +667,7 @@ static void scrollPassportText(int distance, uint32_t now, bool wrap = false) {
 }
 
 static void togglePassportSound(uint32_t now) {
-  const bool saved = passport_sound_toggle();
+  const bool saved = notification_sound_toggle();
   dirty = true;
   if (notes.empty() && saved) return;
   if (passportSoundStatus) lv_obj_delete(passportSoundStatus);
@@ -746,9 +745,7 @@ void ui_add_approval(const Item &it, bool audible) {
   for (auto &a : approvals) if (a.id == it.id) { a.channels |= it.channels; return; }
   approvals.push_back(it);
   wake(); dirty = true;
-#ifdef AGENTREMINDER_PASSPORT
-  if (audible) passport_sound_notify();
-#endif
+  if (audible) notification_sound_notify();
 }
 
 static bool sameCompletion(const Item &a, const Item &b) {
@@ -771,8 +768,8 @@ void ui_add_notify(const Item &it) {
   if (notes.size() > 20) notes.pop_back();
 #ifdef AGENTREMINDER_PASSPORT
   selectedNote = 0;
-  passport_sound_notify();
 #endif
+  notification_sound_notify();
   wake(); dirty = true;
 }
 

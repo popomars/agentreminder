@@ -110,3 +110,13 @@ application. The full image remains available for the community-play installer.
 Keep one host daemon with a per-board enrollment key. Accept legacy single-board
 settings so existing enrollments survive an upgrade. Send each request ID to
 all eligible links and broadcast its first resolution to the connected devices.
+
+### ADR-0007: Share the ES8311 notification player across boards
+
+- Date: 2026-11-26
+- Status: Accepted on the Waveshare sound branch
+
+Both firmware targets use one background playback task and trigger it after
+the card queue accepts a new approval, question, or notification. Each board
+provides its own I2S pins. Waveshare shares its existing I2C bus with the
+touch controller and PMIC, and enables the speaker amplifier just for playback.
