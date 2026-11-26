@@ -101,7 +101,7 @@ packages/repositories. Font regeneration and licensing are in `firmware/src/font
 
 ## USB install and precompiled images
 
-Host v0.4.4 and firmware v0.3.5 are bundled together. `bash install.sh --flash`
+Host v0.5.1 and Waveshare firmware v0.3.15 are bundled together. `bash install.sh --flash`
 verifies the images, flashes the board, installs hooks, and enables USB pairing.
 The board shows a confirmation card when a new host requests enrollment.
 Run `bash flash.sh --check` to verify the four images, or `bash flash.sh` to

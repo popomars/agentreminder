@@ -84,6 +84,10 @@ Run `bash install.sh --menu-bar` from this checkout. Building the menu bar app r
 
 The bell shows the unread notification and pending approval counts. Open its menu to view either list. Opening a notification marks it as read, and there is also a **Mark all as read** action. The service keeps up to 100 notifications for its current run. Completion entries show the host, project, conversation, and “Task completed”. Use the Notifications submenu to clear the local notification list, or the main menu to clear notifications and approvals together. Clearing approvals retracts their device cards and hands decisions back to the originating client. To add a device, connect a board with AgentReminder firmware over USB, choose **Pair a new device**, then confirm on the board.
 
+## Waveshare notification sound
+
+The Waveshare ESP32-S3-Touch-AMOLED-2.16 plays two short beeps for new approvals, questions, and notifications. The device combines duplicate USB and Bluetooth deliveries and plays at most one pair of beeps per second.
+
 ## FoloToy AI Passport
 
 The AI Passport build is a separate community play. It uses the three function buttons on the right and the same host service. USB enrollment and macOS Bluetooth messaging have been tested on the device. Like the Waveshare build, Passport shows receipt times on approvals, questions, and notifications, and keeps only the latest completion per host, project, and conversation. Installation replaces the active play. [Image, controls, and installation](firmware/release/folotoy-ai-passport/README.md)

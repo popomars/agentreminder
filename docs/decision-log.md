@@ -131,3 +131,13 @@ The optional native app starts or connects to the host daemon on loopback.
 The daemon owns unread counts and retains up to 100 notifications in memory
 for its current run. The app uses the existing USB pairing endpoint and the
 same device confirmation as the command-line flow.
+
+### ADR-0009: Share the ES8311 notification player across boards
+
+- Date: 2026-11-26
+- Status: Accepted
+
+Both firmware targets use one background playback task and trigger it after
+the card queue accepts a new approval, question, or notification. Each board
+provides its own I2S pins. Waveshare shares its existing I2C bus with the
+touch controller and PMIC, and enables the speaker amplifier just for playback.
