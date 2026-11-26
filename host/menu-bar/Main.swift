@@ -179,6 +179,13 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return card.kind == "done" ? label("任务完成", "Task completed") : card.title
     }
 
+    private func clearAction(_ title: String, notifications: [Card], approvals: [Card] = []) -> NSMenuItem {
+        let entry = action(title, #selector(clearInbox(_:)),
+                           enabled: inbox?.canClear == true && (!notifications.isEmpty || !approvals.isEmpty))
+        entry.representedObject = ["notifications": notifications.map(\.id), "approvals": approvals.map(\.id)]
+        return entry
+    }
+
     private func addCards(_ cards: [Card], title: String, notifications: Bool = false) {
         let entry = action(title, enabled: !cards.isEmpty)
         if !cards.isEmpty {
@@ -195,8 +202,7 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
             }
             if notifications {
                 list.addItem(.separator())
-                list.addItem(action(label("清除所有通知", "Clear all notifications"),
-                                    #selector(clearNotifications), enabled: inbox?.canClear == true))
+                list.addItem(clearAction(label("清除所有通知", "Clear all notifications"), notifications: cards))
             }
             entry.submenu = list
         }
@@ -221,9 +227,8 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
                      notifications: true)
             addCards(inbox.approvals, title: label("待审批（\(inbox.approvals.count)）", "Pending approvals (\(inbox.approvals.count))"))
             menu.addItem(action(label("全部标为已读", "Mark all as read"), #selector(markAll), enabled: inbox.unread > 0))
-            menu.addItem(action(label("清除所有审批和通知", "Clear all approvals and notifications"),
-                                #selector(clearAll),
-                                enabled: inbox.canClear == true && (!inbox.approvals.isEmpty || !inbox.notifications.isEmpty)))
+            menu.addItem(clearAction(label("清除所有审批和通知", "Clear all approvals and notifications"),
+                                     notifications: inbox.notifications, approvals: inbox.approvals))
         } else {
             item.button?.title = "AgentReminder"
             menu.addItem(action(label("正在连接服务", "Connecting to service"), enabled: false))
@@ -259,13 +264,8 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    @objc private func clearNotifications() { clearInbox(includeApprovals: false) }
-    @objc private func clearAll() { clearInbox(includeApprovals: true) }
-
-    private func clearInbox(includeApprovals: Bool) {
-        guard let inbox, inbox.canClear == true else { return }
-        let cards = ["notifications": inbox.notifications.map(\.id),
-                     "approvals": includeApprovals ? inbox.approvals.map(\.id) : []]
+    @objc private func clearInbox(_ sender: NSMenuItem) {
+        guard let cards = sender.representedObject as? [String: [String]] else { return }
         Task {
             do {
                 let body = try JSONEncoder().encode(cards)
