@@ -26,6 +26,4 @@ const String &ui_connected_host(uint8_t channel);
 void ui_remove_channel(uint8_t channel);
 
 bool ui_font_ok();
-#ifdef AGENTREMINDER_PASSPORT
-bool ui_passport_landscape();
-#endif
+bool ui_landscape();

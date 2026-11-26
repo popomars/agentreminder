@@ -27,7 +27,7 @@ The host ignores any line that is not JSON, such as boot logs. A link only count
 
 | t | Fields | Meaning |
 |---|---|---|
-| `hello` | `app:"agentreminder", fw, id, link, ip?, ble?, ble_paired?, board?, sound?, orientation?` | Handshake reply. `ble:1` indicates USB enrollment support. Firmware that supports chimes reports its sound setting. AI Passport also reports `board:"folotoy-passport"` and its screen orientation. |
+| `hello` | `app:"agentreminder", fw, id, link, ip?, ble?, ble_paired?, board?, sound?, orientation?` | Handshake reply. `ble:1` indicates USB enrollment support. Firmware that supports chimes reports its sound setting. Both boards report screen orientation. AI Passport also reports `board:"folotoy-passport"`. |
 | `pong` | `ts` | Heartbeat reply |
 | `decision` | `id, decision(allow/deny/skip)` | User choice. `skip` = hand it back to the agent's own terminal prompt |
 | `log` | `msg` | Debug output, written to the daemon log |

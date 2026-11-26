@@ -141,3 +141,14 @@ Both firmware targets use one background playback task and trigger it after
 the card queue accepts a new approval, question, or notification. Each board
 provides its own I2S pins. Waveshare shares its existing I2C bus with the
 touch controller and PMIC, and enables the speaker amplifier just for playback.
+
+### ADR-0010: Share screen behavior across Waveshare and Passport
+
+- Date: 2026-11-26
+- Status: Accepted
+
+Waveshare uses the same idle status layout, notification paging and reading
+behavior. Touch targets follow the edge with the physical keys. Waveshare
+keeps its left, center and right approval actions. Sound uses the shared
+preference, and the square panel uses LVGL rotation and matching touch input
+when the controls move to the right edge.
