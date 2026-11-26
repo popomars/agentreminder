@@ -5,7 +5,9 @@ umask 077
 port=
 baud=460800
 board=waveshare-amoled-2.16
+bootstrap_python=${AGENTREMINDER_BOOTSTRAP_PYTHON:-python3}
 check=false
+menu_update=false
 lang=${AGENTREMINDER_LANG:-zh}
 say() { if [[ "$lang" == en ]]; then printf '%s\n' "$2"; else printf '%s\n' "$1"; fi; }
 usage() {
@@ -21,6 +23,7 @@ while (( $# )); do
     --baud) [[ ${2:-} =~ ^[0-9]+$ ]] || { usage >&2; exit 2; }; baud=$2; shift 2;;
     --lang) case "${2:-}" in zh|en) lang=$2;; *) usage >&2; exit 2;; esac; shift 2;;
     --check) check=true; shift;;
+    --menu-update) menu_update=true; shift;;
     -h|--help) usage; exit 0;;
     *) usage >&2; exit 2;;
   esac
@@ -35,7 +38,7 @@ case "$board" in
     image_dir="$root/firmware/release/waveshare-amoled-2.16"
     chip=esp32s3;;
 esac
-python3 - "$image_dir" "$lang" "$board" <<'PY'
+"$bootstrap_python" - "$image_dir" "$lang" "$board" <<'PY'
 import hashlib, sys
 from pathlib import Path
 root = Path(sys.argv[1])
@@ -65,14 +68,16 @@ print("Firmware SHA-256 verification passed." if english else "固件 SHA-256 �
 PY
 if "$check"; then exit 0; fi
 
-env_dir="${AGENTREMINDER_HOME:-"$HOME/.agentreminder"}/flash/esptool-4.9.0"
+state_dir="${AGENTREMINDER_HOME:-"$HOME/.agentreminder"}"
+export AGENTREMINDER_HOME="$state_dir"
+env_dir="$state_dir/flash/esptool-4.9.0"
 python="${AGENTREMINDER_FLASH_PYTHON:-"$env_dir/bin/python"}"
 if [[ ! -x "$python" ]]; then
   if [[ -n ${AGENTREMINDER_FLASH_PYTHON:-} ]]; then
     say "找不到指定的 Python：$python" "Python executable not found: $python" >&2
     exit 1
   fi
-  python3 -m venv "$env_dir"
+  "$bootstrap_python" -m venv "$env_dir"
 fi
 if ! "$python" -c 'import esptool, serial; assert esptool.__version__ == "4.9.0"' 2>/dev/null; then
   "$python" -m pip install 'esptool==4.9.0'
@@ -96,7 +101,31 @@ fi
 host="$root/host/agentreminder.js"
 table_dir=
 restart_daemon=false
+lock="$state_dir/firmware-update.pid"
+mkdir -p "$state_dir"
+"$bootstrap_python" - "$lock" "$$" "$lang" <<'PY_LOCK'
+import fcntl, os, sys
+
+filename, owner, language = sys.argv[1:]
+with open(filename, 'a+') as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    lock.seek(0)
+    current = lock.read().strip()
+    if current.isdecimal() and int(current) > 0:
+        try:
+            os.kill(int(current), 0)
+        except ProcessLookupError:
+            current = ""
+        except PermissionError:
+            pass
+        if current:
+            sys.exit("A firmware update is already in progress." if language == "en" else "已有固件更新正在进行。")
+    lock.seek(0)
+    lock.truncate()
+    lock.write(owner + '\n')
+PY_LOCK
 cleanup() {
+  : > "$lock"
   if [[ -n "$table_dir" ]]; then
     rm -f "$table_dir/partitions.bin"
     rmdir "$table_dir"
@@ -104,12 +133,16 @@ cleanup() {
   if "$restart_daemon"; then node "$host" start; fi
 }
 trap cleanup EXIT
-if [[ -f "$host" ]] && command -v node >/dev/null; then
+trap 'exit 130' INT
+trap 'exit 143' TERM
+if "$menu_update"; then
+  node "$host" firmware-prepare "$lang"
+elif [[ -f "$host" ]] && command -v node >/dev/null; then
   if node "$host" stop --if-running; then
     restart_daemon=true
   else
-    status=$?
-    if [[ "$status" != 3 ]]; then exit "$status"; fi
+    stop_code=$?
+    if [[ "$stop_code" != 3 ]]; then exit "$stop_code"; fi
   fi
 fi
 
@@ -119,7 +152,7 @@ if [[ "$board" == folotoy-passport ]]; then
   application="$image_dir/AgentReminder-AI-Passport-app.bin"
   say "正在检查 AI Passport 的分区表：$port" "Checking the AI Passport partition table on $port"
   "${esptool[@]}" read_flash 0x8000 0x1000 "$table_dir/partitions.bin" --no-progress
-  python3 - "$table_dir/partitions.bin" "$application" "$lang" <<'PY'
+  "$bootstrap_python" - "$table_dir/partitions.bin" "$application" "$lang" <<'PY'
 from hashlib import md5
 from pathlib import Path
 from struct import unpack

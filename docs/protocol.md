@@ -43,9 +43,11 @@ Each frame starts with a two-byte big-endian payload length. The host and device
 
 - `POST /approval {timeoutSec, info}` → long-polls until it returns `{decision: "allow"|"deny"|null, reason}`
 - `POST /notify {info}` → `{delivered: n}`
-- `GET /inbox` → local menu bar view with unread count, recent notifications, active non-pairing approvals and the number of connected devices. Notifications are held in memory, up to 100 per daemon run. The inbox requires a loopback Host header.
+- `GET /inbox` → local menu bar view with unread count, recent notifications, active non-pairing approvals and the number of connected devices. The in-memory inbox keeps the latest notification per host, project and conversation, up to 100 groups. Each row includes its receipt time. The inbox requires a loopback Host header.
+- `POST /inbox/test {lang: "zh"|"en"}` → delivers a sample card to the local menu and its connected devices. Uses the loopback inbox guard and omits Tailnet fan-out.
 - `POST /inbox/read {ids: [...]}` → marks the listed notifications read. Reads do not settle approvals or affect boards.
 - `POST /inbox/clear {notifications: [...], approvals: [...]}` → removes the listed local notifications and hands the listed pending approvals back to their originating clients. The app sends the IDs it displayed, so cards arriving after that snapshot stay in the inbox.
+- `POST /firmware/prepare {}` → releases the USB connections while the local flasher holds the update lock. The service refuses to start an update while approvals or pairing are pending. USB scanning resumes when the flasher exits.
 - `POST /pair {}` → asks one connected USB device for confirmation, preferring an unpaired device when there is exactly one. On macOS, compatible firmware stores a Bluetooth enrollment key after confirmation. The daemon retains earlier board enrollments. Ordinary cards and decisions are restricted to registered USB devices and their authenticated Bluetooth links once at least one device is paired. The daemon broadcasts the first resolution to every ready link.
 - `GET /status`, `POST /raw` (broadcast as-is), `POST /shutdown`
 
@@ -75,7 +77,7 @@ The device groups `done` notifications by `host`, `project`, and `sessionId`. Wh
 
 ## SSH 远程 agent
 
-设备留在本机时，在远程主机用 `bash install.sh --no-pair` 安装 hooks，设置远程
+设备留在本机时，在远程主机用 `bash install.sh --no-menu-bar --no-pair` 安装 hooks，设置远程
 `~/.agentreminder/config.json` 中的 `httpPort` 为 `47331`。保持本机守护进程运行，
 从本机执行：
 

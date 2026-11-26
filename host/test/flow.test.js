@@ -161,19 +161,32 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   decision = null;
   const waiting = sendInbox('/approval', { info: { title: '清除测试' } });
   await until(() => received.some(message => message.t === 'approval' && message.title === '清除测试'));
+  const replacementGroup = { project: '独立项目', conversation: '正在更新的对话', sessionId: 'group-clear-test' };
+  await sendInbox('/notify', { info: { ...replacementGroup, title: '打开菜单时的旧通知', kind: 'done' } });
   const snapshot = await inbox();
+  assert.equal(snapshot.groupsNotifications, true);
   assert.equal(snapshot.canClear, true);
-  const completion = snapshot.notifications.find(note => note.kind === 'done');
+  assert.equal(snapshot.canUpdateFirmware, true);
+  assert.deepEqual(await sendInbox('/firmware/prepare', {}), { error: 'firmware-update-inactive' });
+  const updateLock = path.join(home, 'firmware-update.pid');
+  fs.writeFileSync(updateLock, String(process.pid));
+  assert.deepEqual(await sendInbox('/firmware/prepare', {}), { error: 'approval-pending' });
+  const completion = snapshot.notifications.find(note => note.kind === 'done' && note.project === '项目');
   assert(completion);
   assert.equal(completion.host, relayHost);
-  assert.equal(completion.project, '项目');
   const approvalToClear = snapshot.approvals.find(approval => approval.title === '清除测试');
   assert(approvalToClear);
 
   await sendInbox('/notify', { info: { title: '稍后到达', kind: 'done', conversation: '新对话' } });
+  await sendInbox('/notify', { info: { ...replacementGroup, title: '同组的新通知', kind: 'done' } });
+  const grouped = await inbox();
+  const sameGroup = grouped.notifications.filter(note => note.conversation === replacementGroup.conversation);
+  assert.equal(sameGroup.length, 1);
+  assert.equal(sameGroup[0].title, '同组的新通知');
+  assert.match(sameGroup[0].receivedTime, /^\d{2}-\d{2} \d{2}:\d{2}$/);
   assert.deepEqual(await clearInbox(snapshot.notifications.map(note => note.id)), { ok: true });
   const remaining = await inbox();
-  assert.deepEqual(remaining.notifications.map(note => note.conversation), ['新对话']);
+  assert.deepEqual(remaining.notifications.map(note => note.conversation), ['正在更新的对话', '新对话']);
   assert(remaining.approvals.some(approval => approval.id === approvalToClear.id));
   assert.deepEqual(await clearInbox(remaining.notifications.map(note => note.id), [approvalToClear.id]), { ok: true });
   assert.deepEqual(await waiting, { decision: null, reason: 'menu-bar' });
@@ -182,6 +195,18 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   const cleared = await inbox();
   assert.equal(cleared.unread, 0);
   assert.equal(cleared.approvals.length, 0);
+  assert.deepEqual(await sendInbox('/firmware/prepare', {}), { ok: true });
+  fs.unlinkSync(updateLock);
+  assert.equal((await inbox()).notifications.length, 0);
+
+  assert.deepEqual(await sendInbox('/inbox/test', { lang: 'zh' }), { delivered: 1 });
+  assert.equal((await inbox()).notifications[0].title, '测试通知');
+  await until(() => received.some(message => message.t === 'notify' && message.title === '测试通知'));
+  assert.deepEqual(await sendInbox('/inbox/test', { lang: 'en' }), { delivered: 1 });
+  const menuTest = await inbox();
+  assert.equal(menuTest.canSendTest, true);
+  assert.equal(menuTest.unread, 1);
+  assert.deepEqual(menuTest.notifications.map(note => note.title), ['Test notification']);
 
   proxy.stdin.end();
 });

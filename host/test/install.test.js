@@ -70,7 +70,7 @@ exit 1
     PASSPORT_TEST_TABLE: tableFile,
     PASSPORT_TEST_WRITE: path.join(home, 'write.log'),
   });
-  const { stdout } = await run('bash', ['install.sh', '--lang', 'en', '--flash', '--board', 'folotoy-passport',
+  const { stdout } = await run('bash', ['install.sh', '--no-menu-bar', '--lang', 'en', '--flash', '--board', 'folotoy-passport',
     '--port', '/dev/null', '--no-pair', '--agent', 'dsh'], { cwd: root, env });
   assert.match(stdout, /Flashing the AI Passport application partition/);
   const app = path.join(state, 'app');
@@ -110,7 +110,7 @@ test('installer stages firmware, and its uninstaller removes only managed files 
   fs.writeFileSync(fakePython, '#!/bin/sh\ncase "$1 $2" in -c\\ *) exit 0;; "-m esptool") printf "%s\\n" "$@" > "$FLASH_LOG";; *) exit 1;; esac\n', { mode: 0o700 });
   env.AGENTREMINDER_FLASH_PYTHON = fakePython;
   env.FLASH_LOG = flashLog;
-  const { stdout } = await run('bash', ['install.sh', '--lang', 'en', '--flash', '--port', '/dev/null',
+  const { stdout } = await run('bash', ['install.sh', '--no-menu-bar', '--lang', 'en', '--flash', '--port', '/dev/null',
     '--no-pair', '--agent', 'codex', '--agent', 'claude', '--agent', 'dsh'], { cwd: root, env });
   assert.match(stdout, /Firmware SHA-256 verification passed/);
   assert.match(stdout, /AgentReminder is installed/);
@@ -213,8 +213,122 @@ test('installing the runtime without hooks preserves the existing hook files', a
   const configPath = path.join(codex, 'hooks.json');
   const existing = '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo existing"}]}]}}';
   fs.writeFileSync(configPath, existing);
-  await run('bash', ['install.sh', '--skip-hooks', '--no-pair'], { cwd: root, env });
+  await run('bash', ['install.sh', '--no-menu-bar', '--skip-hooks', '--no-pair'], { cwd: root, env });
   assert.equal(fs.readFileSync(configPath, 'utf8'), existing);
   assert(fs.existsSync(path.join(state, 'app', 'host', 'agentreminder.js')));
   assert(!fs.existsSync(path.join(state, 'dsh-hooks.json')));
+});
+
+
+test('macOS installs and launches the menu bar app by default', { skip: process.platform !== 'darwin', timeout: 45000 }, async t => {
+  const { home, state, env } = fixture(t);
+  delete env.AGENTREMINDER_HOME;
+  const applications = path.join(home, 'Applications');
+  fs.mkdirSync(applications);
+  const bundle = path.join(applications, 'AgentReminder.app');
+  fs.symlinkSync(path.join(state, 'app', 'AgentReminder.app'), bundle);
+  const open = path.join(home, 'open');
+  const launched = path.join(home, 'launched');
+  fs.writeFileSync(open, '#!/bin/sh\nprintf "%s\\n" "$@" > "$LAUNCH_LOG"\n', { mode: 0o700 });
+  env.PATH = `${home}:${env.PATH}`;
+  env.LAUNCH_LOG = launched;
+
+  await run('bash', ['install.sh', '--skip-hooks', '--no-pair'], { cwd: root, env });
+
+  const app = path.join(state, 'app');
+  assert(fs.lstatSync(bundle).isDirectory());
+  assert.deepEqual(fs.readFileSync(launched, 'utf8').trimEnd().split('\n'), ['-n', fs.realpathSync(bundle), '--args', '--replace-existing']);
+  await run('codesign', ['--verify', '--strict', bundle]);
+  assert(fs.existsSync(path.join(app, 'flash.sh')));
+  assert(fs.existsSync(path.join(app, 'firmware/release/waveshare-amoled-2.16/firmware.bin')));
+  await run('bash', [path.join(app, 'uninstall.sh')], { env });
+  assert(!fs.existsSync(bundle));
+});
+
+test('downloaded macOS installer stages a single GitHub revision and launches setup', { skip: process.platform !== 'darwin', timeout: 45000 }, async t => {
+  const { home, state, codex, env } = fixture(t);
+  const downloaded = path.join(home, 'install.sh');
+  fs.copyFileSync(path.join(root, 'install.sh'), downloaded);
+  const revision = '0123456789abcdef0123456789abcdef01234567';
+  const opened = path.join(home, 'open.log');
+  const requests = path.join(home, 'requests.log');
+  Object.assign(env, {
+    PATH: `${home}:${env.PATH}`, GH_TOKEN: 'test-token', INSTALL_FIXTURE_ROOT: root,
+    INSTALL_TEST_REV: revision, INSTALL_TEST_REQUESTS: requests, OPEN_LOG: opened,
+  });
+  fs.writeFileSync(path.join(home, 'open'), '#!/bin/sh\nprintf "%s\\n" "$@" > "$OPEN_LOG"\n', { mode: 0o700 });
+  fs.writeFileSync(path.join(home, 'curl'), `#!/usr/bin/env node
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const url = new URL(process.argv.at(-1));
+const revision = process.env.INSTALL_TEST_REV;
+assert.equal(url.origin, 'https://api.github.com');
+assert.equal(fs.readFileSync(0, 'utf8').trim(), 'Authorization: Bearer test-token');
+const endpoint = url.pathname.replace('/repos/popomars/agentreminder/', '');
+fs.appendFileSync(process.env.INSTALL_TEST_REQUESTS, endpoint + '\\n');
+if (endpoint === 'commits/' + revision) {
+  assert(process.argv.includes('Accept: application/vnd.github.sha'));
+  process.stdout.write(revision);
+} else {
+  assert(endpoint.startsWith('contents/'));
+  assert(process.argv.includes('Accept: application/vnd.github.raw+json'));
+  assert.equal(url.searchParams.get('ref'), revision);
+  process.stdout.write(fs.readFileSync(require('node:path').join(process.env.INSTALL_FIXTURE_ROOT, endpoint.slice(9))));
+}
+`, { mode: 0o700 });
+
+  await run('bash', [downloaded, '--ref', revision, '--agent', 'codex'], { cwd: home, env });
+  const bundle = path.join(state, 'app', 'AgentReminder.app');
+  assert.deepEqual(fs.readFileSync(opened, 'utf8').trimEnd().split('\n'),
+    ['-n', fs.realpathSync(bundle), '--args', '--replace-existing', '--setup-usb']);
+  const fetched = fs.readFileSync(requests, 'utf8').trimEnd().split('\n');
+  assert.equal(fetched[0], 'commits/' + revision);
+  assert(fetched.includes('contents/host/menu-bar/Main.swift'));
+  assert(fetched.includes('contents/firmware/release/waveshare-amoled-2.16/firmware.bin'));
+  assert(fetched.includes('contents/firmware/release/folotoy-ai-passport/AgentReminder-AI-Passport-app.bin'));
+  assert(JSON.parse(fs.readFileSync(path.join(codex, 'hooks.json'), 'utf8')).hooks.Stop);
+  const installation = JSON.parse(fs.readFileSync(path.join(bundle, 'Contents/Resources/Installation.json'), 'utf8'));
+  assert(path.isAbsolute(installation.node));
+  assert(path.isAbsolute(installation.python));
+});
+
+test('menu firmware flash works without a device handshake and keeps the daemon inbox', { timeout: 15000 }, async t => {
+  const { home, state, env } = fixture(t);
+  const portServer = http.createServer();
+  const port = await listen(portServer);
+  await new Promise(resolve => portServer.close(resolve));
+  fs.writeFileSync(path.join(state, 'config.json'), JSON.stringify({
+    httpPort: port, usb: { enabled: false }, bluetooth: { enabled: false },
+  }));
+  const flashMarker = path.join(home, 'flash-called');
+  const simulator = path.join(home, 'mock-esptool');
+  fs.writeFileSync(simulator, `#!/bin/sh
+set -e
+if [ "$1" = -c ]; then exit 0; fi
+if [ "$1" = - ]; then echo /dev/null; exit 0; fi
+test -s "$AGENTREMINDER_HOME/firmware-update.pid"
+printf "%s\\n" "$@" > "$FLASH_MARKER"
+`, { mode: 0o700 });
+  env.AGENTREMINDER_FLASH_PYTHON = simulator;
+  env.FLASH_MARKER = flashMarker;
+  const daemon = spawn(process.execPath, [path.join(root, 'host/agentreminder.js'), 'daemon'], { env, stdio: 'ignore' });
+  t.after(() => daemon.kill());
+  const fromHost = (route, info) => fetch(`http://127.0.0.1:${port}${route}`, info ? {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(info),
+  } : {});
+  for (let i = 0; i < 60; i++) {
+    if (await fromHost('/status').then(r => r.ok).catch(() => false)) break;
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  assert((await fromHost('/notify', { info: { title: 'Keep this notification' } })).ok);
+  await run('bash', ['flash.sh', '--menu-update', '--board', 'waveshare-amoled-2.16'], { cwd: root, env });
+  const argumentsByLine = fs.readFileSync(flashMarker, 'utf8').trim().split('\n');
+  assert(argumentsByLine.includes('write_flash'));
+  assert(argumentsByLine.includes('/dev/null'));
+  assert.deepEqual(argumentsByLine.filter(arg => /^0x/.test(arg)), ['0x0000', '0x8000', '0xe000', '0x10000']);
+  assert.deepEqual(argumentsByLine.filter(arg => arg.endsWith('.bin')).map(arg => path.basename(arg)),
+    ['bootloader.bin', 'partitions.bin', 'boot_app0.bin', 'firmware.bin']);
+  assert.equal((await fromHost('/status').then(r => r.json())).pid, daemon.pid);
+  assert.equal((await fromHost('/inbox').then(r => r.json())).notifications[0].title, 'Keep this notification');
+  assert.equal(fs.readFileSync(path.join(state, 'firmware-update.pid'), 'utf8'), '');
 });

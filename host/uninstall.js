@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
+const { execFileSync } = require('node:child_process');
 const { stopLocalDaemon, HOME_DIR, hookSettings, shellQuote } = require('./agentreminder');
 const { uninstallIfInstalled } = require('./configure-codex-dock');
 const defaultState = path.join(os.homedir(), '.agentreminder');
@@ -81,8 +82,20 @@ function checkInstalledDirectories() {
 
 function removeRuntime() {
   const shortcut = path.join(os.homedir(), 'Applications', 'AgentReminder.app');
-  if (fs.lstatSync(shortcut, { throwIfNoEntry: false })?.isSymbolicLink() &&
-      fs.readlinkSync(shortcut) === path.join(installedDirs[0], 'AgentReminder.app')) fs.unlinkSync(shortcut);
+  const appEntry = fs.lstatSync(shortcut, { throwIfNoEntry: false });
+  if (appEntry?.isSymbolicLink() && fs.readlinkSync(shortcut) === path.join(installedDirs[0], 'AgentReminder.app')) {
+    fs.unlinkSync(shortcut);
+  } else if (!customInstallation && process.platform === 'darwin' && appEntry?.isDirectory()) {
+    let managed = false;
+    try {
+      const bundleID = execFileSync('/usr/libexec/PlistBuddy',
+        ['-c', 'Print CFBundleIdentifier', path.join(shortcut, 'Contents/Info.plist')],
+        { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim();
+      const installation = JSON.parse(fs.readFileSync(path.join(shortcut, 'Contents/Resources/Installation.json'), 'utf8'));
+      managed = bundleID === 'io.github.popomars.agentreminder.menu' && installation.statePath === fs.realpathSync(HOME_DIR);
+    } catch (_) { /* Leave unrelated applications alone. */ }
+    if (managed) fs.rmSync(shortcut, { recursive: true, force: true });
+  }
   for (const file of installedFiles) fs.rmSync(path.join(installedDirs[0], file), { force: true });
   for (const dir of installedDirs.slice().reverse()) {
     try { fs.rmdirSync(dir); }

@@ -2,12 +2,35 @@ import AppKit
 
 private struct Installation: Decodable {
     let node: String
+    let python: String?
     let statePath: String
     let language: String
 
     var stateDirectory: URL { URL(fileURLWithPath: statePath, isDirectory: true) }
 
     var host: URL { stateDirectory.appendingPathComponent("app/host/agentreminder.js") }
+    var flashScript: URL { stateDirectory.appendingPathComponent("app/flash.sh") }
+    var legacyApp: URL { stateDirectory.appendingPathComponent("app/AgentReminder.app") }
+    var codexSetup: URL { stateDirectory.appendingPathComponent("app/host/configure-codex-dock.js") }
+
+    var codexApp: URL? {
+        let locations = [URL(fileURLWithPath: "/Applications"), FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Applications")]
+        return locations.map { $0.appendingPathComponent("ChatGPT.app") }.first { app in
+            let cli = app.appendingPathComponent("Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex")
+            return FileManager.default.isExecutableFile(atPath: cli.path)
+        }
+    }
+
+    var processEnvironment: [String: String] {
+        var environment = ProcessInfo.processInfo.environment
+        let nodeDirectory = URL(fileURLWithPath: node).deletingLastPathComponent().path
+        environment["AGENTREMINDER_HOME"] = stateDirectory.path
+        if let python { environment["AGENTREMINDER_BOOTSTRAP_PYTHON"] = python }
+        environment["PATH"] = [nodeDirectory, environment["PATH"] ?? "", "/opt/homebrew/bin", "/usr/local/bin",
+                               "/usr/bin", "/bin", "/usr/sbin", "/sbin"].joined(separator: ":")
+        return environment
+    }
 
     var endpoint: URL {
         let file = stateDirectory.appendingPathComponent("config.json")
@@ -47,6 +70,8 @@ private struct Inbox: Decodable {
     let approvals: [Card]
     let devices: Int
     let canClear: Bool?
+    let canUpdateFirmware: Bool?
+    let canSendTest: Bool?
 }
 
 private struct Pairing: Decodable {
@@ -56,11 +81,42 @@ private struct Pairing: Decodable {
 }
 
 private struct ReadResult: Decodable { let ok: Bool }
+private struct TestResult: Decodable { let delivered: Int }
+
+private enum FirmwareBoard: String, CaseIterable {
+    case waveshare = "waveshare-amoled-2.16"
+    case passport = "folotoy-passport"
+
+    var name: String {
+        switch self {
+        case .waveshare: "Waveshare ESP32-S3 Touch AMOLED 2.16"
+        case .passport: "FoloToy AI Passport"
+        }
+    }
+}
+
+private struct FirmwareUpdate {
+    let board: FirmwareBoard
+    let directory: URL
+    let process: Process
+
+    var logFile: URL { directory.appendingPathComponent("flash.log") }
+
+    var latestLines: [String] {
+        guard let log = try? FileHandle(forReadingFrom: logFile) else { return [] }
+        defer { try? log.close() }
+        guard let end = try? log.seekToEnd() else { return [] }
+        let start = end > 4096 ? end - 4096 : 0
+        try? log.seek(toOffset: start)
+        guard let tail = try? log.read(upToCount: 4096) else { return [] }
+        return String(decoding: tail, as: UTF8.self).split(whereSeparator: \.isNewline).map(String.init)
+    }
+}
 
 @MainActor
 private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let installation: Installation
-    private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+    private lazy var item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let menu = NSMenu()
     private let session: URLSession
     private var inbox: Inbox?
@@ -69,7 +125,10 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var starting: Process?
     private var lastStart = Date.distantPast
     private var pairing = false
+    private var setupUsb = ProcessInfo.processInfo.arguments.contains("--setup-usb")
+    private var configuringCodex = false
     private var trackingMenu = false
+    private var firmwareUpdate: FirmwareUpdate?
 
     init(installation: Installation) {
         self.installation = installation
@@ -84,6 +143,43 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        guard ProcessInfo.processInfo.arguments.contains("--replace-existing"),
+              let bundleID = Bundle.main.bundleIdentifier else {
+            showMenu()
+            return
+        }
+        let current = NSRunningApplication.current
+        let bundle = Bundle.main.bundleURL.resolvingSymlinksInPath()
+        let legacy = installation.legacyApp.resolvingSymlinksInPath()
+        let paths = [bundle, legacy]
+        let previous = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).filter {
+            $0.processIdentifier != current.processIdentifier &&
+                $0.bundleURL.map { paths.contains($0.resolvingSymlinksInPath()) } == true &&
+                ($0.launchDate ?? .distantPast) <= (current.launchDate ?? .distantFuture)
+        }
+        previous.forEach { _ = $0.terminate() }
+        Task {
+            for _ in 0..<40 {
+                let stopped = previous.allSatisfy { application in
+                    application.isTerminated || (kill(application.processIdentifier, 0) == -1 && errno == ESRCH)
+                }
+                if stopped {
+                    if legacy != bundle, Bundle(url: legacy)?.bundleIdentifier == bundleID {
+                        try? FileManager.default.removeItem(at: installation.legacyApp)
+                    }
+                    showMenu()
+                    return
+                }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+            showAlert(label("新版已安装", "Update installed"),
+                      label("旧版铃铛还在运行。设备操作结束后，退出铃铛，再从访达打开 AgentReminder。",
+                            "The previous bell is still running. When device operations finish, quit it and reopen AgentReminder from Finder."))
+            NSApp.terminate(nil)
+        }
+    }
+
+    private func showMenu() {
         item.menu = menu
         menu.autoenablesItems = false
         menu.delegate = self
@@ -92,6 +188,7 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
             button.imagePosition = .imageLeading
         }
         redraw()
+        if setupUsb { startService(force: true) }
         refresh()
         timer = Timer(timeInterval: 2, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
@@ -125,7 +222,7 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
             defer { refreshing = false }
             do {
                 inbox = try await request("inbox")
-                if inbox?.canClear != true { startService() }
+                if inbox?.canSendTest != true { startService() }
             }
             catch {
                 inbox = nil
@@ -136,21 +233,18 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func startService(force: Bool = false) {
-        guard starting == nil, force || Date().timeIntervalSince(lastStart) >= 10 else { return }
+        guard firmwareUpdate == nil, starting == nil, force || Date().timeIntervalSince(lastStart) >= 10 else { return }
         let process = Process()
         let executable = URL(fileURLWithPath: installation.node)
         process.executableURL = executable
-        process.arguments = [installation.host.path, "menu-start"]
-        var environment = ProcessInfo.processInfo.environment
-        environment["AGENTREMINDER_HOME"] = installation.stateDirectory.path
-        let nodeDirectory = executable.deletingLastPathComponent().path
-        environment["PATH"] = [nodeDirectory, environment["PATH"] ?? "", "/opt/homebrew/bin", "/usr/local/bin",
-                               "/usr/bin", "/bin", "/usr/sbin", "/sbin"].joined(separator: ":")
-        process.environment = environment
+        process.arguments = [installation.host.path, setupUsb ? "setup-usb" : "menu-start"]
+        process.environment = installation.processEnvironment
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
-        process.terminationHandler = { [weak self] _ in
+        process.terminationHandler = { [weak self] completed in
+            let succeeded = completed.terminationStatus == 0
             Task { @MainActor in
+                if succeeded { self?.setupUsb = false }
                 self?.starting = nil
                 self?.refresh()
             }
@@ -195,9 +289,10 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 let subject = oneLine(cardTitle(card, notification: notifications), limit: notifications ? 32 : 72)
                 let context = notifications ? [card.host, card.project, card.conversation].compactMap { $0 }
                     .map { oneLine($0, limit: 24) }.filter { !$0.isEmpty } : []
-                let caption = (context + [subject]).joined(separator: " · ")
+                let time = notifications ? card.receivedTime.flatMap { $0.isEmpty ? nil : $0 } : nil
+                let caption = (context + [subject] + [time].compactMap { $0 }).joined(separator: " · ")
                 let row = action((card.unread == true ? "● " : "") + caption, #selector(showCard(_:)))
-                row.representedObject = card.id
+                row.representedObject = card
                 list.addItem(row)
             }
             if notifications {
@@ -207,6 +302,10 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
             entry.submenu = list
         }
         menu.addItem(entry)
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        firmwareUpdate == nil && !pairing && !configuringCodex ? .terminateNow : .terminateCancel
     }
 
     func menuWillOpen(_ menu: NSMenu) { trackingMenu = true }
@@ -235,21 +334,101 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
             menu.addItem(action(label("重试连接", "Retry connection"), #selector(retry)))
         }
         menu.addItem(.separator())
+        addFirmwareMenu()
         if pairing {
             menu.addItem(action(label("请连接 USB 并在设备上确认", "Connect by USB and confirm on the device"), enabled: false))
         } else {
-            menu.addItem(action(label("配对新设备…", "Pair a new device…"), #selector(pair), enabled: inbox != nil))
+            menu.addItem(action(label("配对新设备…", "Pair a new device…"), #selector(pair), enabled: inbox != nil && firmwareUpdate == nil))
         }
-        menu.addItem(action(label("退出菜单栏应用", "Quit menu bar app"), #selector(quit)))
+        menu.addItem(action(label("发送测试通知", "Send test notification"), #selector(sendTest),
+                            enabled: inbox?.canSendTest == true && firmwareUpdate == nil))
+        if installation.codexApp != nil {
+            let codex = action(label("Codex 桌面双端审批", "Codex Desktop approvals"))
+            let options = NSMenu(title: codex.title)
+            options.autoenablesItems = false
+            for (title, command) in [(label("启用…", "Enable…"), "install"), (label("停用…", "Disable…"), "uninstall")] {
+                let option = action(title, #selector(configureCodex(_:)), enabled: !configuringCodex)
+                option.representedObject = command
+                options.addItem(option)
+            }
+            codex.submenu = options
+            menu.addItem(codex)
+        }
+        menu.addItem(.separator())
+        menu.addItem(action(label("退出菜单栏应用", "Quit menu bar app"), #selector(quit), enabled: firmwareUpdate == nil))
     }
 
     @objc private func retry() { startService(force: true) }
     @objc private func quit() { NSApp.terminate(nil) }
 
+    @objc private func sendTest() {
+        Task {
+            do {
+                let body = try JSONEncoder().encode(["lang": installation.language])
+                let result: TestResult = try await request("inbox/test", method: "POST", body: body)
+                refresh()
+                if result.delivered == 0 {
+                    showAlert(label("已发送测试通知", "Test notification sent"),
+                              label("铃铛的「通知」里可以查看。设备连上后可再试一次。",
+                                    "See it under Notifications in the bell menu. Send another test after connecting a device."))
+                }
+            } catch {
+                showAlert(label("无法发送测试通知", "Could not send the test notification"),
+                          label("请检查铃铛是否已连接本机服务。", "Check the bell’s connection to the local service."))
+            }
+        }
+    }
+
+    @objc private func configureCodex(_ sender: NSMenuItem) {
+        guard !configuringCodex, let command = sender.representedObject as? String,
+              let app = installation.codexApp else { return }
+        let enable = command == "install"
+        let restartMessage = label("配置完成后，完全退出 ChatGPT，再从原来的 Dock 图标打开。",
+                                   "After applying this setting, quit ChatGPT and reopen it from the usual Dock icon.")
+        let alert = NSAlert()
+        alert.messageText = enable ? label("启用 Codex 双端审批？", "Enable Codex Desktop approvals?")
+                                   : label("停用 Codex 双端审批？", "Disable Codex Desktop approvals?")
+        alert.informativeText = restartMessage
+        alert.addButton(withTitle: label("取消", "Cancel"))
+        alert.addButton(withTitle: label("应用", "Apply"))
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertSecondButtonReturn else { return }
+
+        configuringCodex = true
+        redraw()
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: installation.node)
+        process.arguments = [installation.codexSetup.path, command]
+        var environment = installation.processEnvironment
+        environment["AGENTREMINDER_CODEX_APP"] = app.path
+        process.environment = environment
+        let output = Pipe()
+        process.standardOutput = output
+        process.standardError = output
+        process.terminationHandler = { [weak self] completed in
+            let succeeded = completed.terminationStatus == 0
+            let details = String(decoding: output.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+            Task { @MainActor in
+                guard let self else { return }
+                self.configuringCodex = false
+                self.redraw()
+                if succeeded {
+                    self.showAlert(self.label("Codex 配置已应用", "Codex setup applied"), restartMessage)
+                } else {
+                    self.showAlert(self.label("无法更新 Codex 配置", "Could not update Codex setup"), details)
+                }
+            }
+        }
+        do { try process.run() } catch {
+            configuringCodex = false
+            redraw()
+            showAlert(label("无法启动 Codex 配置", "Could not start Codex setup"), error.localizedDescription)
+        }
+    }
+
     @objc private func showCard(_ sender: NSMenuItem) {
-        guard let id = sender.representedObject as? String, let inbox,
-              let card = (inbox.notifications + inbox.approvals).first(where: { $0.id == id }) else { return }
-        if card.unread == true { markRead([id]) }
+        guard let card = sender.representedObject as? Card else { return }
+        if card.unread == true { markRead([card.id]) }
         let message = [card.summary, card.detail ?? ""].filter { !$0.isEmpty }.joined(separator: "\n\n")
         showAlert(cardTitle(card, notification: card.unread != nil), message)
     }
@@ -278,8 +457,114 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
+    private func addFirmwareMenu() {
+        if let update = firmwareUpdate {
+            menu.addItem(action(label("正在更新固件", "Updating firmware"), enabled: false))
+            if let line = update.latestLines.last {
+                menu.addItem(action(String(line.prefix(100)), enabled: false))
+            }
+            return
+        }
+
+        let ready = inbox?.canUpdateFirmware == true && !pairing &&
+            FileManager.default.fileExists(atPath: installation.flashScript.path)
+        let entry = action(label("安装或更新固件…", "Install or update firmware…"), enabled: ready)
+        if ready {
+            let models = NSMenu(title: entry.title)
+            models.autoenablesItems = false
+            for board in FirmwareBoard.allCases {
+                let choice = action(board.name, #selector(updateFirmware(_:)))
+                choice.representedObject = board.rawValue
+                models.addItem(choice)
+            }
+            entry.submenu = models
+        }
+        menu.addItem(entry)
+    }
+
+    @objc private func updateFirmware(_ sender: NSMenuItem) {
+        guard firmwareUpdate == nil, !pairing, let model = sender.representedObject as? String,
+              let board = FirmwareBoard(rawValue: model), let inbox, inbox.canUpdateFirmware == true else { return }
+        guard inbox.approvals.isEmpty else {
+            showAlert(label("有待审批的请求", "Pending approvals"),
+                      label("请处理审批后再更新固件。", "Finish the pending approvals before updating firmware."))
+            return
+        }
+
+        let confirm = NSAlert()
+        confirm.messageText = label("为 \(board.name) 安装或更新固件？",
+                                    "Install or update firmware on \(board.name)?")
+        let usb = label("只用 USB 数据线连接这一台设备，写入时请保持连接。将使用安装包附带的固件。",
+                        "Connect only this board with a USB data cable and leave it connected while writing. The bundled firmware will be used.")
+        let setup: String
+        switch board {
+        case .waveshare:
+            setup = label("刷写会替换板上的现有程序。找不到串口时，按住 BOOT/− 键接入 USB，再松开按键。",
+                          "Flashing replaces the program on the board. If the port is missing, hold BOOT/− while connecting USB, then release it.")
+        case .passport:
+            setup = label("首次安装前请备份原固件。只有分区兼容的设备才会写入应用。",
+                          "Back up the original firmware before your first installation. The app is written only when the partition layout is compatible.")
+        }
+        confirm.informativeText = usb + "\n\n" + setup
+        confirm.alertStyle = .warning
+        confirm.addButton(withTitle: label("取消", "Cancel"))
+        confirm.addButton(withTitle: label("开始刷写", "Start flashing"))
+        NSApp.activate(ignoringOtherApps: true)
+        guard confirm.runModal() == .alertSecondButtonReturn else { return }
+        runFirmwareUpdate(board)
+    }
+
+    private func runFirmwareUpdate(_ board: FirmwareBoard) {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agentreminder-update-" + UUID().uuidString, isDirectory: true)
+        let process = Process()
+        let update = FirmwareUpdate(board: board, directory: directory, process: process)
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
+                                                    attributes: [.posixPermissions: 0o700])
+            try Data().write(to: update.logFile)
+            let log = try FileHandle(forWritingTo: update.logFile)
+            defer { try? log.close() }
+
+            process.executableURL = URL(fileURLWithPath: "/bin/bash")
+            process.arguments = [installation.flashScript.path, "--board", board.rawValue, "--menu-update",
+                                 "--lang", installation.language]
+            process.environment = installation.processEnvironment
+            process.standardOutput = log
+            process.standardError = log
+            process.terminationHandler = { [weak self] completed in
+                let code = completed.terminationStatus
+                Task { @MainActor in self?.finishFirmwareUpdate(code) }
+            }
+            firmwareUpdate = update
+            try process.run()
+            redraw()
+        } catch {
+            firmwareUpdate = nil
+            try? FileManager.default.removeItem(at: directory)
+            showAlert(label("无法启动固件更新", "Could not start the firmware update"), error.localizedDescription)
+            redraw()
+        }
+    }
+
+    private func finishFirmwareUpdate(_ code: Int32) {
+        guard let update = firmwareUpdate else { return }
+        let details = update.latestLines.suffix(10).joined(separator: "\n")
+        firmwareUpdate = nil
+        try? FileManager.default.removeItem(at: update.directory)
+        refresh()
+        redraw()
+        if code == 0 {
+            showAlert(label("固件刷写完成", "Firmware flashed"),
+                      label("\(update.board.name) 正在重启。首次安装请保持 USB 连接，从铃铛菜单选择「配对新设备…」。",
+                            "\(update.board.name) is restarting. For a first installation, keep USB connected and choose Pair a new device… in the bell menu."))
+        } else {
+            showAlert(label("固件更新失败", "Firmware update failed"), details)
+        }
+    }
+
     @objc private func pair() {
-        guard !pairing else { return }
+        guard !pairing, firmwareUpdate == nil else { return }
         pairing = true
         redraw()
         Task {
@@ -305,7 +590,8 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let message: String
         switch error {
         case "no-usb":
-            message = label("请用数据线连接一台已刷好固件的设备，再试一次。", "Connect a device with AgentReminder firmware over USB and try again.")
+            message = label("请用 USB 数据线连接一台已刷好固件的设备。首次使用时，请先在铃铛菜单选择「安装或更新固件…」。",
+                            "Connect a device with AgentReminder firmware using a USB data cable. For first-time setup, choose Install or update firmware… in the bell menu first.")
         case "multiple-usb":
             message = label("检测到多台可配对设备，请只保留本次要配对的一台。", "Connect only the device you want to pair.")
         case "approval-pending":
