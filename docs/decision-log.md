@@ -86,13 +86,38 @@ keeps the latest completion per source host, project, and conversation.
 A session ID distinguishes conversations with the same title. Firmware can
 still display cards from an older daemon that sends no formatted timestamp.
 
-### ADR-0005: Mirror cards directly between selected Tailnet peers
+### ADR-0005: Build AI Passport as an independent community play
+
+- Date: 2026-11-25
+- Status: Accepted on the FoloToy branch
+
+Use the same AgentReminder host and authenticated USB-enrolled Bluetooth link
+for both boards. Build the Passport application for ESP32-C3 and package it
+as a community-play image. Also provide an application-only image for devices
+with a compatible factory partition, so an installation can keep the existing
+partition table, identity data and assets. The full image is bounded by the
+start of the asset partitions observed on the test board.
+
+The installation and flash scripts require an explicit Passport board selection.
+The script verifies the existing partition table before writing only the factory
+application. The full image remains available for the community-play installer.
+
+### ADR-0006: Share cards across enrolled devices
+
+- Date: 2026-11-25
+- Status: Accepted on the FoloToy branch
+
+Keep one host daemon with a per-board enrollment key. Accept legacy single-board
+settings so existing enrollments survive an upgrade. Send each request ID to
+all eligible links and broadcast its first resolution to the connected devices.
+
+### ADR-0007: Mirror cards directly between selected Tailnet peers
 
 - Date: 2026-11-25
 - Status: Accepted
 
 Every participating computer runs the same daemon and connects directly to its
 peer list, discovered through Tailscale by default. Both peers prove possession
-of the shared key before any card is sent. The source daemon owns the response to its agent. Receivers
-serve cards locally without forwarding them. A separate Tailnet listener keeps
-hook administration and pairing on loopback.
+of the shared key before any card is sent. The source daemon owns the response
+to its agent. Receivers serve cards locally without forwarding them. A separate
+Tailnet listener keeps hook administration and pairing on loopback.

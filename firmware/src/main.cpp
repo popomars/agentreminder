@@ -1,24 +1,46 @@
 // AgentReminder firmware: USB CDC, BLE, and optional Wi-Fi transport for the same cards.
 #include <Arduino.h>
+#ifndef AGENTREMINDER_PASSPORT
 #include <WiFi.h>
 #include <ESPmDNS.h>
 #include <Preferences.h>
+#endif
 #include <ArduinoJson.h>
 #include "ui.h"
 #include "ble_transport.h"
 
-#define FW_VERSION "0.3.5"
-#define TCP_PORT 47322
-#define HOSTNAME "agentreminder"
+#ifdef AGENTREMINDER_PASSPORT
+#include <nvs_flash.h>
+#include "passport_sound.h"
 
-static WiFiServer server(TCP_PORT);
+// Arduino reformats default NVS on two initialization errors. A Passport may
+// still need that data for the previous play, so keep it and leave BLE unpaired.
+extern "C" esp_err_t __real_nvs_flash_init(void);
+extern "C" esp_err_t __wrap_nvs_flash_init(void) {
+  const esp_err_t error = __real_nvs_flash_init();
+  if (error == ESP_ERR_NVS_NO_FREE_PAGES || error == ESP_ERR_NVS_NEW_VERSION_FOUND) return ESP_ERR_INVALID_STATE;
+  return error;
+}
+
+static constexpr size_t usbRxBuffer = 4096;
+static constexpr char fwVersion[] = "0.3.20";
+#else
+static constexpr size_t usbRxBuffer = 16384;
+static constexpr char fwVersion[] = "0.3.5";
+static constexpr uint16_t tcpPort = 47322;
+static WiFiServer server(tcpPort);
 static WiFiClient client;
 static Preferences prefs;
-static String usbBuf, tcpBuf;
+static String tcpBuf;
+static uint32_t lastWifiPacket;
+static bool wifiActive;
+static bool mdnsUp;
+#endif
+
+static String usbBuf;
 static String pairingId, pairingKey;
-static uint32_t pairingAt, lastUsbPacket, lastWifiPacket;
-static bool usbActive, wifiActive;
-static bool mdnsUp = false;
+static uint32_t pairingAt, lastUsbPacket;
+static bool usbActive;
 
 static String deviceId() {
   uint64_t mac = ESP.getEfuseMac();
@@ -29,7 +51,9 @@ static String deviceId() {
 static void sendOn(uint8_t ch, JsonDocument &doc) {
   String s; serializeJson(doc, s); s += '\n';
   if ((ch & CH_USB)) Serial.print(s);
+#ifndef AGENTREMINDER_PASSPORT
   if ((ch & CH_WIFI) && client && client.connected()) client.print(s);
+#endif
   if (ch & CH_BLE) ble_send(s);
 }
 
@@ -49,33 +73,44 @@ void sendDecision(const Item &it, const char *decision) {
   sendOn(it.channels, d);
 }
 
+#ifndef AGENTREMINDER_PASSPORT
+static constexpr char hostname[] = "agentreminder";
 static void startWifi() {
   prefs.begin("ar", true);
   String ssid = prefs.getString("ssid", ""), pass = prefs.getString("pass", "");
   prefs.end();
   if (!ssid.length()) return;
   WiFi.mode(WIFI_STA);
-  WiFi.setHostname(HOSTNAME);
+  WiFi.setHostname(hostname);
   WiFi.setSleep(false);              // lower latency for button presses
   WiFi.begin(ssid.c_str(), pass.c_str());
 }
+#endif
 
 static void handle(const String &line, uint8_t ch) {
   JsonDocument m;
   if (deserializeJson(m, line)) return;
   const char *t = m["t"] | "";
   if (ch == CH_USB) { lastUsbPacket = millis(); usbActive = true; }
+#ifndef AGENTREMINDER_PASSPORT
   if (ch == CH_WIFI) { lastWifiPacket = millis(); wifiActive = true; }
+#endif
 
   if (!strcmp(t, "hello")) {
     ui_set_connected_host(ch, m["host"] | "");
     JsonDocument r;
-    r["t"] = "hello"; r["app"] = "agentreminder"; r["fw"] = FW_VERSION; r["id"] = deviceId();
+    r["t"] = "hello"; r["app"] = "agentreminder"; r["fw"] = fwVersion; r["id"] = deviceId();
     r["link"] = ch == CH_USB ? "usb" : ch == CH_BLE ? "ble" : "wifi";
     r["ble"] = 1; r["ble_paired"] = ble_paired();
     r["interaction"] = true;
     r["font_ok"] = ui_font_ok();
+#ifdef AGENTREMINDER_PASSPORT
+    r["board"] = "folotoy-passport";
+    r["sound"] = passport_sound_enabled();
+    r["orientation"] = ui_passport_landscape() ? "landscape" : "portrait";
+#else
     if (WiFi.status() == WL_CONNECTED) r["ip"] = WiFi.localIP().toString();
+#endif
     sendOn(ch, r);
   } else if (!strcmp(t, "ping")) {
     JsonDocument r; r["t"] = "pong"; r["ts"] = m["ts"]; sendOn(ch, r);
@@ -112,7 +147,7 @@ static void handle(const String &line, uint8_t ch) {
       it.project = m["project"] | "";
       if (it.project.isEmpty()) it.project = "未命名项目";
     }
-    if (pairing || !strcmp(t, "approval")) ui_add_approval(it);
+    if (pairing || !strcmp(t, "approval")) ui_add_approval(it, !pairing);
     else {
       it.completed = !strcmp(m["kind"] | "", "done");
       ui_add_notify(it);
@@ -124,6 +159,7 @@ static void handle(const String &line, uint8_t ch) {
       clearPairing();
     }
     ui_remove(id);
+#ifndef AGENTREMINDER_PASSPORT
   } else if (!strcmp(t, "wifi") && ch == CH_USB) {
     prefs.begin("ar", false);
     prefs.putString("ssid", m["ssid"] | ""); prefs.putString("pass", m["pass"] | "");
@@ -131,6 +167,7 @@ static void handle(const String &line, uint8_t ch) {
     WiFi.disconnect(true); mdnsUp = false;
     startWifi();
     JsonDocument r; r["t"] = "log"; r["msg"] = "wifi saved, connecting"; sendOn(ch, r);
+#endif
   }
 }
 
@@ -143,11 +180,13 @@ static void pump(Stream &s, String &buf, uint8_t ch) {
 }
 
 void setup() {
-  Serial.setRxBufferSize(16384);
+  Serial.setRxBufferSize(usbRxBuffer);
   Serial.begin(115200);
   ui_init();
   ble_init(deviceId(), [](const String &line) { handle(line, CH_BLE); }, [] { ui_remove_channel(CH_BLE); });
+#ifndef AGENTREMINDER_PASSPORT
   startWifi();
+#endif
 }
 
 void loop() {
@@ -161,6 +200,7 @@ void loop() {
   if (pairingId.length() && millis() - pairingAt >= 60000UL) clearPairing();
   ble_poll();
 
+#ifndef AGENTREMINDER_PASSPORT
   const bool wifiUp = WiFi.status() == WL_CONNECTED;
   if (wifiActive && (!wifiUp || !client.connected() || millis() - lastWifiPacket > 40000UL)) {
     wifiActive = false;
@@ -169,8 +209,8 @@ void loop() {
     ui_remove_channel(CH_WIFI);
   }
   if (wifiUp && !mdnsUp) {
-    mdnsUp = MDNS.begin(HOSTNAME);
-    if (mdnsUp) MDNS.addService("agentreminder", "tcp", TCP_PORT);
+    mdnsUp = MDNS.begin(hostname);
+    if (mdnsUp) MDNS.addService("agentreminder", "tcp", tcpPort);
     server.begin(); server.setNoDelay(true);
   }
   if (wifiUp) {
@@ -183,6 +223,7 @@ void loop() {
     }
     if (client && client.connected()) pump(client, tcpBuf, CH_WIFI);
   }
+#endif
 
   ui_loop();
   delay(5);

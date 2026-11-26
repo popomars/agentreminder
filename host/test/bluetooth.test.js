@@ -104,3 +104,40 @@ test('card times survive approval replay and notifications in the same milliseco
   assert.equal(second.receivedTime, '01-02 03:05');
   assert(second.sequence > first.sequence);
 });
+
+test('a legacy USB enrollment and a second BLE enrollment share cards and settle an approval once', async t => {
+  const secondId = 'B0123456789F';
+  const outsiderId = 'C0123456789F';
+  const hub = new Hub({
+    usb: { pairedDeviceId: id },
+    bluetooth: { key },
+    pairedDevices: [{ id: secondId, key: 'bb'.repeat(32) }],
+  });
+  const connect = (kind, deviceId) => {
+    const messages = [];
+    const link = new Link(kind, deviceId, json => messages.push(JSON.parse(json)), () => {}, hub);
+    if (kind === 'ble') link.pairedDeviceId = deviceId;
+    hub.add(link);
+    t.after(() => link.close());
+    hub.onMessage(link, { t: 'hello', app: 'agentreminder', id: deviceId, interaction: true });
+    return { link, messages };
+  };
+  const first = connect('usb', id);
+  const second = connect('ble', secondId);
+  const outsider = connect('usb', outsiderId);
+  const request = hub.requestApproval({ title: '确认操作', interaction: true, choices: ['一', '二'] }, 1000);
+  assert.equal(first.messages.at(-1).id, request.id);
+  assert.deepEqual(first.messages.at(-1), second.messages.at(-1));
+  assert(!outsider.messages.some(m => m.id === request.id));
+  hub.onMessage(outsider.link, { t: 'decision', id: request.id, decision: 'allow' });
+  assert(hub.pending.has(request.id));
+  hub.onMessage(second.link, { t: 'decision', id: request.id, decision: 'deny' });
+  hub.onMessage(first.link, { t: 'decision', id: request.id, decision: 'allow' });
+  assert.equal((await request.promise).decision, 'deny');
+  for (const { messages } of [first, second]) {
+    assert.equal(messages.filter(m => m.t === 'resolved' && m.id === request.id).length, 1);
+  }
+  assert.equal(hub.notify({ title: '完成', kind: 'done' }), 2);
+  assert.deepEqual(first.messages.at(-1), second.messages.at(-1));
+  assert(!outsider.messages.some(m => m.t === 'notify'));
+});
