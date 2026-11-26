@@ -25,10 +25,12 @@ The landscape idle screen shows Bluetooth and USB status side by side. The idle 
 ## 安装与恢复
 
 1. 用 [FoloToy 官方桌面工具](https://ai-passport.folotoy.cn/tools/desktop-app/) 备份通行证当前的完整 Flash。备份可能包含设备身份及私有配置，请保存在本机。
-2. 保留现有布局时，先读取设备分区表。只有确认设备使用位于 `0x10000` 的工厂应用分区、分区至少 3 MiB，且没有更优先的 OTA 启动槽时，才用 esptool 将 `AgentReminder-AI-Passport-app.bin` 写到 `0x10000`。写入前用 `SHA256SUMS` 校验。要用 [官方本地玩法安装工具](https://ai-passport.folotoy.cn/tools/web-flasher/) 安装完整玩法，请选 `AgentReminder-AI-Passport-full.bin`，并提前确认原设备的身份和素材分区位于镜像写入范围之外。
-3. 启动 AgentReminder 主机服务，接入通行证并在配对卡出现后按中键确认。要从已配对的另一块板子切换，可只接入通行证并执行 `node ~/.agentreminder/app/host/agentreminder.js pair`。
+2. 从仓库根目录运行 `bash install.sh --flash --board folotoy-passport` 安装主机服务并刷机。已安装主机服务时，也可用 `bash flash.sh --board folotoy-passport` 只刷设备。脚本先校验镜像，再读取现有分区表。通过校验后，仅写入位于 `0x10000`、至少 3 MiB 的唯一工厂应用分区。
+3. 首次安装后，在配对卡出现时按中键确认。把 Passport 添加到已配对其他设备的主机时，接入通行证并执行 `node ~/.agentreminder/app/host/agentreminder.js pair`。
 
-完整玩法镜像写入起始地址为 `0x0`，范围止于 `0x310000` 前，并会写入新的分区表和空白 NVS。这台实测设备的素材区从 `0x310000` 开始，`cardid` 位于 `0x356000`。不同玩法可能使用不同分区布局。应用镜像仅替换原有应用区。蓝牙配对时，AgentReminder 用独立的 `ar` 命名空间保存配对信息。
+需要用 [官方本地玩法安装工具](https://ai-passport.folotoy.cn/tools/web-flasher/) 安装完整玩法时，选择 `AgentReminder-AI-Passport-full.bin`。它从 `0x0` 写入，范围止于 `0x310000` 前，并会写入新的分区表。首次启动会初始化 NVS。完整安装前，请根据当前玩法的实际分区表核对身份、配置和素材的存放位置。实测设备的素材区从 `0x310000` 开始，`cardid` 位于 `0x356000`。
+
+For a compatible Passport, run `bash install.sh --lang en --flash --board folotoy-passport`, or use `bash flash.sh --lang en --board folotoy-passport` to flash only. The script verifies the images and the on-device partition table before writing the single factory app at `0x10000`. Back up the current board with the official desktop tool before replacing its app. The full image is available for the official community-play installer and includes a replacement partition table.
 
 ## 从源码构建
 

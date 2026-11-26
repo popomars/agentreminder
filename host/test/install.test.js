@@ -2,6 +2,7 @@
 
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
+const { createHash } = require('node:crypto');
 const fs = require('node:fs');
 const http = require('node:http');
 const os = require('node:os');
@@ -25,6 +26,82 @@ async function listen(server) {
   await new Promise((resolve, reject) => server.once('error', reject).listen(0, '127.0.0.1', resolve));
   return server.address().port;
 }
+
+function partitionTable(entries) {
+  const table = Buffer.alloc(0x1000, 0xff);
+  for (const [index, [kind, subtype, start, length]] of entries.entries()) {
+    const offset = index * 32;
+    table.fill(0, offset, offset + 32);
+    table.writeUInt16LE(0x50aa, offset);
+    table[offset + 2] = kind;
+    table[offset + 3] = subtype;
+    table.writeUInt32LE(start, offset + 4);
+    table.writeUInt32LE(length, offset + 8);
+  }
+  const offset = entries.length * 32;
+  table.writeUInt16LE(0xebeb, offset);
+  createHash('md5').update(table.subarray(0, offset)).digest().copy(table, offset + 16);
+  return table;
+}
+
+test('Passport installer writes only the compatible factory application and uninstalls its files', { timeout: 15000 }, async t => {
+  const { home, state, env } = fixture(t);
+  const tableFile = path.join(home, 'device-partitions.bin');
+  const esptoolLog = path.join(home, 'esptool.log');
+  const fakePython = path.join(home, 'fake-python');
+  const entries = [[1, 2, 0x9000, 0x6000], [0, 0, 0x10000, 0x300000], [1, 2, 0x356000, 0x4000]];
+  const table = partitionTable(entries);
+  fs.writeFileSync(tableFile, table);
+  fs.writeFileSync(fakePython, `#!/bin/sh
+if [ "$1" = -c ]; then exit 0; fi
+printf '%s\\n' "$@" >> "$PASSPORT_TEST_LOG"
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    read_flash) cp "$PASSPORT_TEST_TABLE" "$4"; exit $?;;
+    write_flash) printf '%s\\n' "$@" > "$PASSPORT_TEST_WRITE"; exit 0;;
+  esac
+  shift
+done
+exit 1
+`, { mode: 0o700 });
+  Object.assign(env, {
+    AGENTREMINDER_FLASH_PYTHON: fakePython,
+    PASSPORT_TEST_LOG: esptoolLog,
+    PASSPORT_TEST_TABLE: tableFile,
+    PASSPORT_TEST_WRITE: path.join(home, 'write.log'),
+  });
+  const { stdout } = await run('bash', ['install.sh', '--lang', 'en', '--flash', '--board', 'folotoy-passport',
+    '--port', '/dev/null', '--no-pair', '--agent', 'dsh'], { cwd: root, env });
+  assert.match(stdout, /Flashing the AI Passport application partition/);
+  const app = path.join(state, 'app');
+  const bundle = path.join(app, 'firmware/release/folotoy-ai-passport');
+  const image = path.join(bundle, 'AgentReminder-AI-Passport-app.bin');
+  assert(fs.existsSync(path.join(bundle, 'AgentReminder-AI-Passport-full.bin')));
+  assert.deepEqual(fs.readFileSync(env.PASSPORT_TEST_WRITE, 'utf8').trimEnd().split('\n'), [
+    'write_flash', '-z', '--flash_mode', 'keep', '--flash_freq', 'keep', '--flash_size', 'keep', '0x10000', image,
+  ]);
+  assert.match(fs.readFileSync(esptoolLog, 'utf8'), /--chip\nesp32c3\n/);
+  assert.match(fs.readFileSync(esptoolLog, 'utf8'), /read_flash\n0x8000\n0x1000\n/);
+
+  const corrupt = Buffer.from(table);
+  corrupt[entries.length * 32 + 16] ^= 1;
+  for (const invalid of [
+    corrupt,
+    partitionTable([[1, 2, 0x9000, 0x6000], [0, 0, 0x10000, 0x200000]]),
+    partitionTable([...entries, [0, 0x10, 0x360000, 0x100000]]),
+    partitionTable([...entries, [1, 2, 0x30f000, 0x3000]]),
+  ]) {
+    fs.writeFileSync(tableFile, invalid);
+    fs.rmSync(env.PASSPORT_TEST_WRITE, { force: true });
+    await assert.rejects(run('bash', [path.join(app, 'flash.sh'), '--board', 'folotoy-passport',
+      '--port', '/dev/null', '--lang', 'en'], { env }), /Unsupported AI Passport partition layout/);
+    assert(!fs.existsSync(env.PASSPORT_TEST_WRITE));
+  }
+
+  fs.writeFileSync(path.join(bundle, 'my-notes.txt'), 'keep');
+  await run('bash', [path.join(app, 'uninstall.sh')], { env });
+  assert.deepEqual(fs.readdirSync(bundle), ['my-notes.txt']);
+});
 
 test('installer stages firmware, and its uninstaller removes only managed files and hooks', { timeout: 15000 }, async t => {
   const { home, state, codex, env } = fixture(t);

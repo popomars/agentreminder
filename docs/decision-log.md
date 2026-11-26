@@ -98,6 +98,10 @@ with a compatible factory partition, so an installation can keep the existing
 partition table, identity data and assets. The full image is bounded by the
 start of the asset partitions observed on the test board.
 
+The installation and flash scripts require an explicit Passport board selection.
+The script verifies the existing partition table before writing only the factory
+application. The full image remains available for the community-play installer.
+
 ### ADR-0006: Share cards across enrolled devices
 
 - Date: 2026-11-25

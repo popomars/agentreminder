@@ -59,6 +59,11 @@ Passport v0.3.19 aligns the landscape idle footer with the host name at the left
 Passport v0.3.20 gives the host and project separate full-width lines on
 landscape cards.
 
+The installer accepts `--flash --board folotoy-passport`. It stages the Passport
+package from the same revision as the host, validates the existing partition
+layout, and writes only the factory application. Uninstall removes the staged
+images and keeps pairing data.
+
 Host v0.4.5 keeps multiple enrollments in one daemon. Automated tests cover
 two paired boards receiving the same message and the first decision clearing
 both cards. Passport has also reconnected to this version of the main daemon.

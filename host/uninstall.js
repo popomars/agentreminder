@@ -54,10 +54,12 @@ const installedFiles = [
   'host/tools/hardware-check.js', 'integrations/dsh/cordis.patch.yml', 'flash.sh',
   ...['bootloader.bin', 'partitions.bin', 'boot_app0.bin', 'firmware.bin', 'SHA256SUMS']
     .map(file => `firmware/release/waveshare-amoled-2.16/${file}`),
+  ...['AgentReminder-AI-Passport-app.bin', 'AgentReminder-AI-Passport-full.bin', 'SHA256SUMS']
+    .map(file => `firmware/release/folotoy-ai-passport/${file}`),
   'host/uninstall.js', 'uninstall.sh',
 ];
 const installedDirs = ['', 'host', 'host/bluetooth', 'host/tools', 'integrations', 'integrations/dsh',
-  'firmware', 'firmware/release', 'firmware/release/waveshare-amoled-2.16']
+  'firmware', 'firmware/release', 'firmware/release/waveshare-amoled-2.16', 'firmware/release/folotoy-ai-passport']
   .map(dir => path.resolve(HOME_DIR, 'app', dir));
 
 function checkInstalledDirectories() {

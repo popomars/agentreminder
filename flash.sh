@@ -4,15 +4,19 @@ umask 077
 
 port=
 baud=460800
+board=waveshare-amoled-2.16
 check=false
 lang=${AGENTREMINDER_LANG:-zh}
 say() { if [[ "$lang" == en ]]; then printf '%s\n' "$2"; else printf '%s\n' "$1"; fi; }
 usage() {
-  say '用法：bash flash.sh [--port DEVICE] [--baud RATE] [--check] [--lang zh|en]' \
-      'Usage: bash flash.sh [--port DEVICE] [--baud RATE] [--check] [--lang zh|en]'
+  say '用法：bash flash.sh [--board waveshare-amoled-2.16|folotoy-passport] [--port DEVICE] [--baud RATE] [--check] [--lang zh|en]' \
+      'Usage: bash flash.sh [--board waveshare-amoled-2.16|folotoy-passport] [--port DEVICE] [--baud RATE] [--check] [--lang zh|en]'
 }
 while (( $# )); do
   case "$1" in
+    --board)
+      case "${2:-}" in waveshare-amoled-2.16|folotoy-passport) board=$2;; *) usage >&2; exit 2;; esac
+      shift 2;;
     --port) [[ -n ${2:-} ]] || { usage >&2; exit 2; }; port=$2; shift 2;;
     --baud) [[ ${2:-} =~ ^[0-9]+$ ]] || { usage >&2; exit 2; }; baud=$2; shift 2;;
     --lang) case "${2:-}" in zh|en) lang=$2;; *) usage >&2; exit 2;; esac; shift 2;;
@@ -23,13 +27,23 @@ while (( $# )); do
 done
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-image_dir="$root/firmware/release/waveshare-amoled-2.16"
-python3 - "$image_dir" "$lang" <<'PY'
+case "$board" in
+  folotoy-passport)
+    image_dir="$root/firmware/release/folotoy-ai-passport"
+    chip=esp32c3;;
+  waveshare-amoled-2.16)
+    image_dir="$root/firmware/release/waveshare-amoled-2.16"
+    chip=esp32s3;;
+esac
+python3 - "$image_dir" "$lang" "$board" <<'PY'
 import hashlib, sys
 from pathlib import Path
 root = Path(sys.argv[1])
 english = sys.argv[2] == 'en'
-names = {"bootloader.bin", "partitions.bin", "boot_app0.bin", "firmware.bin"}
+passport = sys.argv[3] == 'folotoy-passport'
+app = 'AgentReminder-AI-Passport-app.bin'
+full = 'AgentReminder-AI-Passport-full.bin'
+names = {app, full} if passport else {"bootloader.bin", "partitions.bin", "boot_app0.bin", "firmware.bin"}
 try:
     for line in (root / "SHA256SUMS").read_text().splitlines():
         expected, name = line.split()
@@ -38,6 +52,12 @@ try:
             raise ValueError(name)
     if names:
         raise ValueError(", ".join(sorted(names)))
+    if passport:
+        application = (root / app).read_bytes()
+        merged = (root / full).read_bytes()
+        if (application[:1] != b'\xe9' or int.from_bytes(application[12:14], 'little') != 5
+                or len(merged) > 0x310000 or merged[0x10000:] != application):
+            raise ValueError("AI Passport image layout")
 except (OSError, ValueError, KeyError) as error:
     message = "Firmware files are missing or failed verification. Download them again." if english else "固件不完整或校验失败。请从仓库完整下载后重试。"
     sys.exit(f"{message} {error}")
@@ -65,8 +85,8 @@ from serial.tools import list_ports
 
 ports = [p.device for p in list_ports.comports() if (p.vid, p.pid) == (0x303a, 0x1001)]
 if len(ports) != 1:
-    message = ("Connect one ESP32-S3 USB Serial/JTAG board or pass --port."
-               if sys.argv[1] == 'en' else "请只连接一台 ESP32-S3 USB Serial/JTAG 设备，或用 --port 指定串口。")
+    message = ("Connect one Espressif USB Serial/JTAG board or pass --port."
+               if sys.argv[1] == 'en' else "请只连接一台 Espressif USB Serial/JTAG 设备，或用 --port 指定串口。")
     sys.exit(message + (" " + ", ".join(ports) if ports else ""))
 print(ports[0])
 PY
@@ -74,21 +94,72 @@ PY
 fi
 [[ -c "$port" ]] || { say "找不到串口：$port" "Serial port not found: $port" >&2; exit 1; }
 host="$root/host/agentreminder.js"
+table_dir=
+restart_daemon=false
+cleanup() {
+  if [[ -n "$table_dir" ]]; then
+    rm -f "$table_dir/partitions.bin"
+    rmdir "$table_dir"
+  fi
+  if "$restart_daemon"; then node "$host" start; fi
+}
+trap cleanup EXIT
 if [[ -f "$host" ]] && command -v node >/dev/null; then
   if node "$host" stop --if-running; then
-    trap 'node "$host" start' EXIT
+    restart_daemon=true
   else
     status=$?
     if [[ "$status" != 3 ]]; then exit "$status"; fi
   fi
 fi
 
-say "正在为微雪 ESP32-S3-Touch-AMOLED-2.16 刷机：$port" "Flashing Waveshare ESP32-S3-Touch-AMOLED-2.16 on $port"
-"$python" -m esptool --chip esp32s3 --port "$port" --baud "$baud" \
-  --before default_reset --after hard_reset write_flash -z \
-  --flash_mode dio --flash_freq 80m --flash_size 16MB \
-  0x0000 "$image_dir/bootloader.bin" \
-  0x8000 "$image_dir/partitions.bin" \
-  0xe000 "$image_dir/boot_app0.bin" \
-  0x10000 "$image_dir/firmware.bin"
+esptool=("$python" -m esptool --chip "$chip" --port "$port" --baud "$baud" --before default_reset --after hard_reset)
+if [[ "$board" == folotoy-passport ]]; then
+  table_dir="$(mktemp -d "${TMPDIR:-/tmp}/agentreminder-partitions.XXXXXXXX")"
+  application="$image_dir/AgentReminder-AI-Passport-app.bin"
+  say "正在检查 AI Passport 的分区表：$port" "Checking the AI Passport partition table on $port"
+  "${esptool[@]}" read_flash 0x8000 0x1000 "$table_dir/partitions.bin" --no-progress
+  python3 - "$table_dir/partitions.bin" "$application" "$lang" <<'PY'
+from hashlib import md5
+from pathlib import Path
+from struct import unpack
+import sys
+
+table = Path(sys.argv[1]).read_bytes()
+size = Path(sys.argv[2]).stat().st_size
+english = sys.argv[3] == 'en'
+partitions = []
+verified = False
+if len(table) == 0x1000:
+    for offset in range(0, 0xC00, 32):
+        record = table[offset:offset + 32]
+        if record[:16] == b'\xeb\xeb' + b'\xff' * 14:
+            padding = table[offset + 32:]
+            verified = record[16:] == md5(table[:offset]).digest() and padding == b'\xff' * len(padding)
+            break
+        magic, kind, subtype, start, length, _, flags = unpack('<HBBII16sI', record)
+        if (magic != 0x50AA or start < 0x9000 or length == 0 or start + length > 0x800000
+                or start % 0x1000 or length % 0x1000):
+            break
+        partitions.append((start, start + length, kind, subtype, flags))
+
+partitions.sort()
+apps = [(start, end, subtype, flags) for start, end, kind, subtype, flags in partitions if kind == 0]
+overlap = any(left[1] > right[0] for left, right in zip(partitions, partitions[1:]))
+if (not verified or overlap or len(apps) != 1 or apps[0][0] != 0x10000
+        or apps[0][1] < 0x310000 or apps[0][2:] != (0, 0)
+        or size > apps[0][1] - apps[0][0]):
+    sys.exit("Unsupported AI Passport partition layout. No firmware was written."
+             if english else "AI Passport 分区布局不兼容，本次没有写入固件。")
+PY
+  say "正在写入 AI Passport 的应用分区：$port" "Flashing the AI Passport application partition on $port"
+  "${esptool[@]}" write_flash -z --flash_mode keep --flash_freq keep --flash_size keep 0x10000 "$application"
+else
+  say "正在为微雪 ESP32-S3-Touch-AMOLED-2.16 刷机：$port" "Flashing Waveshare ESP32-S3-Touch-AMOLED-2.16 on $port"
+  "${esptool[@]}" write_flash -z --flash_mode dio --flash_freq 80m --flash_size 16MB \
+    0x0000 "$image_dir/bootloader.bin" \
+    0x8000 "$image_dir/partitions.bin" \
+    0xe000 "$image_dir/boot_app0.bin" \
+    0x10000 "$image_dir/firmware.bin"
+fi
 say '刷机成功。设备重启后即可通过 USB 配对。' 'Flashing complete. Once the board restarts, you can pair it over USB.'
