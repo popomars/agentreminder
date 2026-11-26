@@ -105,3 +105,13 @@ An isolated USB test logged playback on the board.
 Waveshare v0.3.15 reduces the PCM peak to 1500 after a further volume
 reduction, keeps the two 30 ms tones and passes an isolated USB playback test.
 The listener approved this cue after a Waveshare-only replay.
+
+Waveshare v0.3.16 shares the Passport-style idle view, one-card notification
+paging and approval reading behavior. The Waveshare touch controls and
+physical keys support muting, and the device stores the sound and orientation
+settings. The host suite, both firmware builds and the package checks pass.
+A headless LVGL check verified paging, mute, rotation and rotated touch hit
+testing. On the Waveshare board, the listener confirmed the Passport-style
+idle layout and physical paging and clearing. After a single touchscreen tap
+to mute, a device reboot preserved the setting. Two test notifications and
+one approval rendered without an audible cue.

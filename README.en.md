@@ -84,9 +84,13 @@ Run `bash install.sh --menu-bar` from this checkout. Building the menu bar app r
 
 The bell shows the unread notification and pending approval counts. Open its menu to view either list. Opening a notification marks it as read, and there is also a **Mark all as read** action. The service keeps up to 100 notifications for its current run. Completion entries show the host, project, conversation, and “Task completed”. Use the Notifications submenu to clear the local notification list, or the main menu to clear notifications and approvals together. Clearing approvals retracts their device cards and hands decisions back to the originating client. To add a device, connect a board with AgentReminder firmware over USB, choose **Pair a new device**, then confirm on the board.
 
-## Waveshare notification sound
+## Waveshare screen and controls
 
-The Waveshare ESP32-S3-Touch-AMOLED-2.16 plays two short beeps for new approvals, questions, and notifications. The device combines duplicate USB and Bluetooth deliveries and plays at most one pair of beeps per second.
+The default layout puts the controls along the top edge. The idle screen shows the host name, side-by-side Bluetooth and USB status, and the sound setting. The notification screen shows one card at a time. Press left for the previous card, center to clear, or right for the next card. The touchscreen offers the same controls.
+
+On the idle or notification screen, tap the sound button or hold the right key for about half a second to toggle sound. The device saves the setting across restarts. When enabled, new cards play two short beeps. The device combines duplicate USB and Bluetooth deliveries and plays at most one pair per second.
+
+Tap the orientation button or hold the left key on the idle or notification screen to move the controls to the right edge. The device saves the orientation. On an approval, hold left to scroll or hold right to rotate. A short press on left denies, center hands the request back to the computer, and right approves. Key names refer to the default position with USB at the bottom.
 
 ## FoloToy AI Passport
 
