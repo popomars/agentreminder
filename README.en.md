@@ -39,13 +39,15 @@ To move a board to a new Mac, connect it by USB and pair from the bell on the ne
 
 The installer detects Codex CLI, Claude Code CLI, dsh, and WorkBuddy and merges the required hooks. For a CLI installed in a custom location, run the installer from a terminal that can run the command. If you use an alias, add the executable's directory to `PATH`, or use `--agent codex`, `--agent claude`, or `--agent dsh` to write the hooks explicitly. The installer remembers the Claude executable it finds so the menu bar service can check its version after login.
 
-Codex CLI defaults to `~/.codex/hooks.json` and Claude Code to `~/.claude/settings.json`. If either client uses a custom configuration directory, pass that same directory to the downloaded installer. The menu service remembers it. Set only the variable for each directory you customized.
+Codex CLI defaults to `~/.codex/hooks.json` and Claude Code to `~/.claude/settings.json`. If either client uses a custom configuration directory, follow the GitHub download steps above and replace the final line with the command below. The menu service remembers the directories you pass. Set only the variable for each directory you customized.
 
 ```bash
 CODEX_HOME="$HOME/custom settings/codex" \
 CLAUDE_CONFIG_DIR="$HOME/custom settings/claude" \
-bash ./install.sh
+bash agentreminder-install.sh --ref "$revision" --lang en
 ```
+
+When installing from a checkout, keep the same environment variables and use `bash install.sh --lang en` as the final line. Use **Agent integrations** to enable agents installed later.
 
 For a relocated Codex Desktop app, the bell looks through running apps and apps registered with macOS. If there are multiple copies or none is detected, use **Agent integrations → Codex Desktop approvals → Choose Desktop App…** and select the `.app` you use. After relocating WorkBuddy, open it once and enable its integration from the bell. Configure the dsh profile you actually use as shown below.
 

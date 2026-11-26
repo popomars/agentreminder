@@ -39,13 +39,15 @@ curl -fsS -H 'Accept: application/vnd.github.raw+json' \
 
 安装器会自动检测 Codex CLI、Claude Code CLI、dsh 和 WorkBuddy，并合并所需 hooks。CLI 装在自定义位置时，从能运行对应命令的终端执行安装。如果命令只在别名里可用，可以先把实际可执行文件所在目录加到 `PATH`，或用 `--agent codex`、`--agent claude`、`--agent dsh` 显式写入 hooks。安装器会记住找到的 Claude 可执行文件，菜单服务登录后也能用它检查版本。
 
-Codex CLI 默认使用 `~/.codex/hooks.json`，Claude Code 默认使用 `~/.claude/settings.json`。如果客户端使用自定义配置目录，运行已下载的安装脚本时传入相同的目录，菜单服务也会记住它们。只改了一个客户端的目录，就只传相应变量。
+Codex CLI 默认使用 `~/.codex/hooks.json`，Claude Code 默认使用 `~/.claude/settings.json`。如果客户端使用自定义配置目录，按上面的 GitHub 下载步骤取得脚本，再把最后一行替换为下面的命令。菜单服务会记住这些目录。只改了一个客户端的目录，就只传相应变量。
 
 ```bash
 CODEX_HOME="$HOME/自定义目录/codex" \
 CLAUDE_CONFIG_DIR="$HOME/自定义目录/claude" \
-bash ./install.sh
+bash agentreminder-install.sh --ref "$revision"
 ```
+
+从仓库安装时，保留相同的环境变量，把最后一行改为 `bash install.sh`。后来才安装的 Agent 可以从 **Agent 接入** 启用。
 
 Codex 桌面端移到其他文件夹后，铃铛会从正在运行的应用和 macOS 注册的应用中查找。如果有多个副本或未找到，在 **Agent 接入 → Codex 双端审批（桌面端）→ 选择桌面应用…** 中选实际使用的 `.app`。WorkBuddy 搬动后，可先打开一次，再从 **Agent 接入** 启用。dsh 按表中的方法配置实际使用的 profile。
 
