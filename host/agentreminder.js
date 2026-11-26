@@ -26,7 +26,7 @@ const bluetooth = require('./bluetooth');
 const tailnet = require('./tailnet');
 const workbuddy = require('./workbuddy');
 
-const VERSION = '0.5.11';
+const VERSION = '0.5.13';
 const UNKNOWN_CONVERSATION = '未命名对话';
 const HOME_DIR = process.env.AGENTREMINDER_HOME || path.join(os.homedir(), '.agentreminder');
 const CONFIG_PATH = path.join(HOME_DIR, 'config.json');
@@ -35,11 +35,13 @@ const INTEGRATION_AGENTS = ['codex', 'claude', 'dsh', 'workbuddy'];
 const AGENT_CONFIG_ENV = { codex: 'CODEX_HOME', claude: 'CLAUDE_CONFIG_DIR' };
 const WORKBUDDY_DIR = path.join(os.homedir(), '.workbuddy');
 const INBOX_HANDOFF_PATH = path.join(HOME_DIR, 'inbox-upgrade.json');
+const DEVICE_NOTIFICATION_LIMIT = 20;
+const BLE_NOTIFICATION_REPLAY_INTERVAL_MS = 100;
 
 const DEFAULT_CONFIG = {
   httpPort: 47321,              // daemon <-> hook (127.0.0.1 only)
   approvalTimeoutSec: 300,      // after this the agent falls back to its own prompt
-  preventIdleSleep: false,
+  preventIdleSleep: true,
   usb: { enabled: true, patterns: ['^cu\\.usbmodem', '^ttyACM'] },
   bluetooth: { enabled: true },
   wifi: { enabled: false, hosts: ['agentreminder.local'], port: 47322 },
@@ -98,6 +100,10 @@ function inboxCard(payload) {
     host: clip(host, 120), project: clip(project, 120), conversation: clip(conversation, 180),
     receivedTime: clip(receivedTime, 24), kind: clip(kind, 24) };
 }
+function interactionChoices({ choices }) {
+  return Array.isArray(choices) && choices.length === 2 && choices.every(choice => typeof choice === 'string')
+    ? choices : undefined;
+}
 function cardTime(ts) {
   const date = new Date(ts);
   const two = n => String(n).padStart(2, '0');
@@ -150,7 +156,7 @@ class Link {
 }
 
 class Hub {
-  constructor(cfg, relayDismissals = () => {}) {
+  constructor(cfg, relayDismissals = () => {}, menuAvailable = () => false) {
     this.cfg = cfg;
     this.links = new Set();
     this.pending = new Map();   // id -> { payload, resolve, timer }
@@ -158,6 +164,7 @@ class Hub {
     this.notifications = new Map();
     this.dismissedNotifications = new Set();
     this.relayDismissals = relayDismissals;
+    this.menuAvailable = menuAvailable;
   }
   connectedLinks() { return [...this.links].filter(l => l.ready); }
   pairings() { return registeredDevices(this.cfg); }
@@ -185,10 +192,18 @@ class Hub {
   onClose(link) {
     clearTimeout(link.helloTimer);
     clearInterval(link.helloRetry);
+    clearTimeout(link.notificationReplay);
     this.links.delete(link);
     log('link closed', link.kind, link.name);
     for (const [id, pending] of this.pending) {
-      if (pending.target ? pending.target === link : !this.requestLinks(pending.payload).length) this.cancel(id, 'device-disconnected');
+      if (pending.target === link) this.cancel(id, 'device-disconnected');
+    }
+    this.cancelUnreachableApprovals('device-disconnected');
+  }
+  cancelUnreachableApprovals(reason) {
+    if (!this.pending.size || this.menuAvailable()) return;
+    for (const [id, pending] of this.pending) {
+      if (!pending.target && !this.requestLinks(pending.payload).length) this.cancel(id, reason);
     }
   }
   onMessage(link, msg) {
@@ -207,16 +222,18 @@ class Hub {
             link.send({ t: 'dismiss', ids: [...this.dismissedNotifications] });
           }
           for (const p of this.pending.values()) {
-            if (!p.target && this.requestLinks(p.payload).includes(link)) {
-              link.send({ ...p.payload, timeout: Math.max(1, Math.ceil((p.deadline - Date.now()) / 1000)) });
+            const timeout = Math.ceil((p.deadline - Date.now()) / 1000);
+            if (timeout > 0 && !p.target && this.requestLinks(p.payload).includes(link)) {
+              link.send({ ...p.payload, timeout });
             }
           }
+          if (link.kind === 'ble' && !link.closed) this.replayUnreadNotifications(link);
         }
         break;
       case 'decision': {
         const pending = this.pending.get(msg.id);
         if (link.ready && pending && (pending.target ? pending.target === link : this.requestLinks(pending.payload).includes(link)) &&
-            (!pending.payload.interaction || pending.payload.choices?.length === 2 || msg.decision === 'skip') &&
+            (!pending.payload.interaction || interactionChoices(pending.payload) || msg.decision === 'skip') &&
             ['allow', 'deny', 'skip'].includes(msg.decision))
           this.resolve(msg.id, msg.decision, `${link.kind}:${link.name}`, msg.ble_paired === true);
         break;
@@ -238,15 +255,13 @@ class Hub {
       receivedTime: cardTime(ts), timeout: Math.max(1, Math.ceil(timeoutMs / 1000)) };
   }
 
-  /** Ask connected devices. promise -> { decision: 'allow'|'deny'|null } (null = let the agent ask normally). */
+  /** Ask connected devices and the menu bar. A null decision lets the agent ask normally. */
   requestApproval(info, timeoutMs, target = null, enrollmentKey = null, card = null) {
     const payload = card ? { ...card, timeout: Math.max(1, Math.ceil(timeoutMs / 1000)) } : this.approvalCard(info, timeoutMs);
     const { id } = payload;
     const links = target ? [target] : this.requestLinks(info);
-    if (!links.length || (target && (!target.ready || target.closed))) {
-      if (info.interaction && this.readyLinks().length) {
-        this.notify({ ...info, kind: 'input' });
-      }
+    if (!links.length && info.interaction && this.readyLinks().length) this.notify({ ...info, kind: 'input' });
+    if (target ? !target.ready || target.closed : !links.length && !this.menuAvailable()) {
       return { id, promise: Promise.resolve({ decision: null, reason: 'no-device' }) };
     }
     const promise = new Promise(resolve => {
@@ -257,6 +272,13 @@ class Hub {
       log('approval ->', id, info.agent, info.title);
     });
     return { id, promise };
+  }
+  resolveFromMenu(id, decision) {
+    const pending = this.pending.get(id);
+    if (!pending || pending.target) return false;
+    if (decision !== 'skip' && pending.payload.interaction && !interactionChoices(pending.payload)) return false;
+    this.resolve(id, decision, 'menu-bar');
+    return true;
   }
   resolve(id, decision, by, bluetoothPaired = false) {
     const p = this.pending.get(id);
@@ -304,17 +326,40 @@ class Hub {
   }
   notify(info, payload = this.notificationCard(info)) {
     if (this.dismissedNotifications.has(payload.id)) return 0;
-    const { ts, sequence } = payload;
+    const { ts, sequence, agent, reason } = payload;
     const sessionId = typeof payload.sessionId === 'string' ? payload.sessionId || undefined : undefined;
-    this.storeNotification({ ...inboxCard(payload), sessionId, ts, sequence, unread: true });
+    this.storeNotification({ ...inboxCard(payload), sessionId, ts, sequence, unread: true,
+      agent: agent ? clip(agent, 80) : undefined, reason: reason ? clip(reason, 500) : undefined });
     const links = this.readyLinks();
-    for (const link of links) {
-      if (info.kind === 'input' && info.reason && link.info.interaction !== true) {
-        link.send({ ...payload, title: clip(`${info.title} · ${info.reason}`, 240), reason: '' });
-      } else link.send(payload);
-    }
+    for (const link of links) this.sendNotification(link, payload);
     log('notify ->', info.agent, info.kind, info.kind === 'input' ? 'awaiting input' : info.title);
     return links.length;
+  }
+
+  sendNotification(link, payload) {
+    if (payload.kind === 'input' && payload.reason && link.info.interaction !== true) {
+      link.send({ ...payload, title: clip(`${payload.title} · ${payload.reason}`, 240), reason: '' });
+    } else link.send(payload);
+  }
+
+  replayUnreadNotifications(link) {
+    const ids = [...this.notifications.values()].filter(note => note.unread)
+      .sort((a, b) => (a.ts ?? 0) - (b.ts ?? 0) || (a.sequence ?? 0) - (b.sequence ?? 0))
+      .slice(-DEVICE_NOTIFICATION_LIMIT).map(note => note.id);
+    const next = () => {
+      if (link.closed || !this.readyLinks().includes(link)) return;
+      const { unread, ...payload } = this.notifications.get(ids.shift()) || {};
+      // A menu read, group replacement, or device dismissal may arrive during replay.
+      if (unread) {
+        const reason = payload.kind === 'input' ? payload.reason || payload.detail : payload.reason;
+        this.sendNotification(link, { ...payload, reason, t: 'notify' });
+      }
+      if (ids.length && !link.closed) {
+        link.notificationReplay = setTimeout(next, BLE_NOTIFICATION_REPLAY_INTERVAL_MS).unref();
+      }
+    };
+    // Give the board time to upload offline dismissals and pace the GATT write queue.
+    if (ids.length) link.notificationReplay = setTimeout(next, BLE_NOTIFICATION_REPLAY_INTERVAL_MS).unref();
   }
 
   dismissNotifications(ids, { source, relay = true } = {}) {
@@ -524,8 +569,13 @@ function runDaemon() {
   if (firmwareUpdateActive()) throw new Error("A firmware update is already in progress.");
   ensureHome();
   const cfg = loadConfig();
-  let mesh, meshConfigError, setupToken;
-  const hub = new Hub(cfg, ids => mesh?.broadcastDismissals(ids));
+  let mesh, meshConfigError, setupToken, menuPid;
+  const menuAvailable = () => {
+    if (!menuPid) return false;
+    try { return process.kill(menuPid, 0); }
+    catch (_) { return false; }
+  };
+  const hub = new Hub(cfg, ids => mesh?.broadcastDismissals(ids), menuAvailable);
   const notify = async info => mesh ? await mesh.notify(info) : hub.notify(info);
   const workbuddyApprovals = workbuddy.createApprovalMonitor(path.join(WORKBUDDY_DIR, 'audit-log'), notify, log);
   const sleepPrevention = createSleepPrevention();
@@ -581,28 +631,38 @@ function runDaemon() {
     const reply = (code, obj) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(obj)); };
     try {
       if (req.headers.origin) return reply(403, { error: 'browser requests are not supported' });
-      if (req.url === '/inbox' || req.url === '/inbox/read' || req.url === '/inbox/clear' || req.url === '/inbox/test' || req.url === '/firmware/prepare' || req.url === '/tailnet/setup' || req.url === '/agent-integrations' || req.url === '/sleep-prevention') {
+      if (req.url === '/inbox' || req.url === '/inbox/read' || req.url === '/inbox/clear' || req.url === '/inbox/test' || req.url === '/inbox/decision' || req.url === '/firmware/prepare' || req.url === '/tailnet/setup' || req.url === '/agent-integrations' || req.url === '/sleep-prevention') {
         if (!/^(127\.0\.0\.1|localhost)(:\d+)?$/i.test(req.headers.host || '')) {
           return reply(403, { error: 'endpoint requires a loopback host' });
         }
         res.setHeader('Cache-Control', 'no-store');
       }
       if (req.method === 'GET' && req.url === '/inbox') {
+        const menuRequest = authorizedSetup(req);
+        const pid = Number(req.headers['x-agentreminder-menu-pid']);
+        // Registration lasts while the GUI process is alive, including when macOS throttles its polling.
+        if (menuRequest && Number.isInteger(pid) && pid > 1 && pid <= 0x7fffffff) menuPid = pid;
         const notifications = [...hub.notifications.values()].reverse().sort((a, b) => (b.ts ?? 0) - (a.ts ?? 0));
         const approvals = new Map();
+        for (const [id, { card }] of mesh?.outgoing || []) approvals.set(id, card);
         for (const { payload, target } of hub.pending.values()) {
           if (!target) approvals.set(payload.id, payload);
         }
-        for (const [id, { card }] of mesh?.outgoing || []) approvals.set(id, card);
         return reply(200, {
           canClear: true, canUpdateFirmware: true, canSendTest: true, groupsNotifications: true,
+          canResolveApprovals: !!menuRequest,
           canInitializeTailnet: !!setupToken, tailnetConfigured: !!mesh, tailnetListening: mesh?.status().listening ?? false,
           canManageIntegrations: !!setupToken,
           canManageSleepPrevention: !!setupToken && sleepPrevention.supported,
           sleepPrevention: sleepPrevention.status(),
           agentIntegrations: Object.fromEntries(INTEGRATION_AGENTS.map(agent => [agent, integrationStatus(cfg, agent)])),
           notifications, unread: notifications.filter(note => note.unread).length,
-          approvals: [...approvals.values()].map(inboxCard),
+          approvals: [...approvals.values()].map(payload => ({
+            ...inboxCard(payload), interaction: payload.interaction === true,
+            operation: payload.reason && payload.detail && payload.reason !== payload.detail ? clip(payload.detail, 500) : undefined,
+            choices: payload.interaction ? interactionChoices(payload) : undefined,
+            actionable: hub.pending.has(payload.id),
+          })),
           devices: new Set(hub.readyLinks().map(link => link.info.id)).size });
       }
       if (req.method === 'GET' && req.url === '/status') {
@@ -629,15 +689,20 @@ function runDaemon() {
         }
         return reply(200, { ok: true });
       }
+      if (req.url === '/inbox/decision') {
+        if (!authorizedSetup(req)) return reply(403, { error: 'unauthorized' });
+        const { id, decision } = body || {};
+        if (typeof id !== 'string' || !['allow', 'deny', 'skip'].includes(decision)) {
+          return reply(400, { error: 'invalid-decision' });
+        }
+        return reply(200, { ok: hub.resolveFromMenu(id, decision) });
+      }
       if (req.url === '/inbox/clear') {
         hub.dismissNotifications(body?.notifications);
         for (const id of Array.isArray(body?.approvals) ? body.approvals : []) {
           const outgoing = mesh?.outgoing.get(id);
           if (outgoing) outgoing.handoff();
-          else {
-            const pending = hub.pending.get(id);
-            if (pending && !pending.target) hub.resolve(id, 'skip', 'menu-bar');
-          }
+          else hub.resolveFromMenu(id, 'skip');
         }
         return reply(200, { ok: true });
       }
@@ -711,6 +776,7 @@ function runDaemon() {
         return reply(result.deviceId ? 200 : 409, result);
       }
       if (req.url === '/approval' || req.url === '/interaction') {
+        if (res.destroyed) return;
         if ([...hub.pending.values()].some(pending => pending.target)) {
           return reply(200, { decision: null, reason: 'pairing-in-progress' });
         }
@@ -767,6 +833,10 @@ function runDaemon() {
     workbuddyApprovals.setEnabled(integrationStatus(cfg, 'workbuddy') === 'enabled');
     sleepPrevention.setEnabled(cfg.preventIdleSleep);
     setInterval(() => {
+      if (menuPid && !menuAvailable()) {
+        menuPid = undefined;
+        hub.cancelUnreachableApprovals('menu-closed');
+      }
       const devices = hub.pairings();
       const upgrade = cfg.bluetooth.enabled && bluetooth.available() &&
         hub.connectedLinks().find(link => link.kind === 'usb' && link.info.ble === 1 && devices.has(link.info.id) &&
@@ -1099,7 +1169,7 @@ async function runHook(argv) {
       const timeoutSec = cfg.approvalTimeoutSec;
       const r = await call('POST', '/approval', { timeoutSec, info: { agent, ...session, title, detail, reason } }, (timeoutSec + 10) * 1000);
       if (!r.decision) return;                         // no device / timeout / "use terminal": normal flow
-      const msg = r.decision === 'deny' ? 'Denied from AgentReminder device' : 'Approved from AgentReminder device';
+      const msg = r.decision === 'deny' ? 'Denied from AgentReminder' : 'Approved from AgentReminder';
       if (event === 'permission') {
         out({ hookSpecificOutput: { hookEventName: 'PermissionRequest',
           decision: r.decision === 'allow' ? { behavior: 'allow' } : { behavior: 'deny', message: msg } } });

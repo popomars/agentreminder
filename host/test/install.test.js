@@ -45,7 +45,7 @@ function partitionTable(entries) {
   return table;
 }
 
-test('idle sleep prevention is opt-in, local, and restored when the daemon restarts', { skip: process.platform !== 'darwin', timeout: 10000 }, async t => {
+test('idle sleep prevention defaults on and preserves an explicit choice across daemon restarts', { skip: process.platform !== 'darwin', timeout: 10000 }, async t => {
   const { state, env } = fixture(t);
   const reserve = http.createServer();
   const port = await listen(reserve);
@@ -73,22 +73,29 @@ test('idle sleep prevention is opt-in, local, and restored when the daemon resta
     body: JSON.stringify({ enabled }),
   });
   const authorized = () => ({ 'x-agentreminder-setup': fs.readFileSync(path.join(state, 'menu-setup.token'), 'utf8').trim() });
+  const stop = async () => {
+    const stopped = once(child, 'exit');
+    child.kill();
+    await stopped;
+  };
 
-  assert.deepEqual((await started(false)).sleepPrevention, { supported: true, enabled: false, active: false });
-  assert.equal((await toggle(true)).status, 403);
-  assert.equal((await toggle(true, { ...authorized(), Origin: 'https://example.test' })).status, 403);
+  assert.deepEqual((await started(true)).sleepPrevention, { supported: true, enabled: true, active: true });
+  assert.equal((await toggle(false)).status, 403);
+  assert.equal((await toggle(false, { ...authorized(), Origin: 'https://example.test' })).status, 403);
   assert.equal((await toggle('true', authorized())).status, 400);
+  assert.deepEqual(JSON.parse(fs.readFileSync(configFile, 'utf8')), initial);
+  assert.deepEqual(await (await toggle(false, authorized())).json(), { ok: true });
+  assert.deepEqual((await get('/status')).sleepPrevention, { supported: true, enabled: false, active: false });
+  assert.deepEqual(JSON.parse(fs.readFileSync(configFile, 'utf8')), { ...initial, preventIdleSleep: false });
+
+  await stop();
+  assert.deepEqual((await started(false)).sleepPrevention, { supported: true, enabled: false, active: false });
   assert.deepEqual(await (await toggle(true, authorized())).json(), { ok: true });
   assert.deepEqual((await get('/status')).sleepPrevention, { supported: true, enabled: true, active: true });
   assert.deepEqual(JSON.parse(fs.readFileSync(configFile, 'utf8')), { ...initial, preventIdleSleep: true });
 
-  const stopped = once(child, 'exit');
-  child.kill();
-  await stopped;
+  await stop();
   assert.deepEqual((await started(true)).sleepPrevention, { supported: true, enabled: true, active: true });
-  assert.deepEqual(await (await toggle(false, authorized())).json(), { ok: true });
-  assert.deepEqual((await get('/status')).sleepPrevention, { supported: true, enabled: false, active: false });
-  assert.deepEqual(JSON.parse(fs.readFileSync(configFile, 'utf8')), { ...initial, preventIdleSleep: false });
 });
 
 test('Passport installer writes only the compatible factory application and uninstalls its files', { timeout: 15000 }, async t => {

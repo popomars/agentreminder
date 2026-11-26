@@ -80,6 +80,25 @@ test('no device, timeout and cancelled hook return control to terminal', async (
   a.link.close();
 });
 
+test('a live menu keeps approvals without a board and never decides USB pairing', async () => {
+  let menu = true;
+  const hub = new Hub({}, undefined, () => menu);
+  const board = device(hub);
+  const pairing = hub.requestApproval({}, 1000, board.link, 'pairing-key');
+  assert.equal(hub.resolveFromMenu(pairing.id, 'allow'), false);
+  board.link.close();
+  assert.equal((await pairing.promise).reason, 'device-disconnected');
+
+  const input = hub.requestApproval({ interaction: true }, 1000);
+  assert.equal(hub.resolveFromMenu(input.id, 'allow'), false);
+  assert.equal(hub.resolveFromMenu(input.id, 'skip'), true);
+  assert.equal((await input.promise).decision, null);
+  const approval = hub.requestApproval({}, 1000);
+  menu = false;
+  hub.cancelUnreachableApprovals('menu-closed');
+  assert.equal((await approval.promise).reason, 'menu-closed');
+});
+
 test('concurrent approvals keep separate deadlines and finish independently', async t => {
   const hub = new Hub({});
   const a = device(hub);

@@ -5,6 +5,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { setTimeout: pause } = require('node:timers/promises');
 const { Session, cipherStream, frame } = require('../bluetooth');
 process.env.AGENTREMINDER_HOME = fs.mkdtempSync(path.join(os.tmpdir(), 'agentreminder-ble-'));
 const { Hub, Link } = require('../agentreminder');
@@ -103,6 +104,51 @@ test('card times survive approval replay and notifications in the same milliseco
   assert.equal(first.ts, second.ts);
   assert.equal(second.receivedTime, '01-02 03:05');
   assert(second.sequence > first.sequence);
+});
+
+test('a reconnecting BLE board receives outstanding approvals and the latest unread notifications', async t => {
+  const hub = new Hub({ pairedDevices: [{ id, key }] }, undefined, () => true);
+  const hello = { t: 'hello', app: 'agentreminder', id, interaction: true, notificationDismissals: true };
+  const connect = (deviceId = id) => {
+    const messages = [];
+    const link = new Link('ble', deviceId, line => messages.push(JSON.parse(line)), () => {}, hub);
+    link.pairedDeviceId = id;
+    hub.add(link);
+    t.after(() => link.close());
+    hub.onMessage(link, { ...hello, id: deviceId });
+    return { link, messages };
+  };
+  connect().link.close();
+  const pending = hub.requestApproval({ title: '待审批' }, 10000);
+  t.after(() => hub.cancel(pending.id, 'test cleanup'));
+  const resolved = hub.requestApproval({ title: '已处理' }, 10000);
+  hub.resolveFromMenu(resolved.id, 'allow');
+  const finished = hub.notificationCard({ kind: 'done', title: '旧进展', sessionId: 'chat' });
+  const updated = hub.notificationCard({ kind: 'done', title: '最新进展', sessionId: 'chat' });
+  const read = hub.notificationCard({ kind: 'done', title: '已读', sessionId: 'read' });
+  const cleared = hub.notificationCard({ kind: 'done', title: '已清除', sessionId: 'cleared' });
+  const boardCleared = hub.notificationCard({ kind: 'done', title: '设备断线时清除', sessionId: 'offline-clear' });
+  const input = hub.notificationCard({ kind: 'input', title: '等待回答', detail: '输入', reason: '请回到原 Agent 完成' });
+  for (const note of [finished, updated, read, cleared, boardCleared, input]) {
+    assert.equal(hub.notify(note, note), 0);
+  }
+  hub.notifications.get(read.id).unread = false;
+  hub.dismissNotifications([cleared.id]);
+
+  const outsider = connect('F01102030405');
+  assert(outsider.link.closed);
+  assert(!outsider.messages.some(message => ['notify', 'approval'].includes(message.t)));
+  const reconnected = connect();
+  hub.onMessage(reconnected.link, hello);
+  hub.onMessage(reconnected.link, { t: 'dismiss', ids: [boardCleared.id] });
+  assert.deepEqual(reconnected.messages.filter(message => message.t === 'approval').map(message => message.id), [pending.id]);
+  assert(reconnected.messages.some(message => message.t === 'dismiss' && message.ids.includes(cleared.id)));
+  for (let i = 0; i < 40 && !reconnected.messages.some(message => message.id === input.id); i++) await pause(25);
+  const notes = reconnected.messages.filter(message => message.t === 'notify');
+  assert.deepEqual(notes.map(message => message.id), [updated.id, input.id]);
+  assert.equal(notes[0].receivedTime, updated.receivedTime);
+  assert.equal(notes[0].sequence, updated.sequence);
+  assert.equal(notes[1].reason, input.reason);
 });
 
 test('a legacy USB enrollment and a second BLE enrollment share cards and settle an approval once', async t => {

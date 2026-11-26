@@ -45,6 +45,8 @@ Each frame starts with a two-byte big-endian payload length. The host and device
 - `POST /approval {timeoutSec, info}` → long-polls until it returns `{decision: "allow"|"deny"|null, reason}`
 - `POST /notify {info}` → `{delivered: n}`
 - `GET /inbox` → local menu bar view with unread count, recent notifications, active non-pairing approvals and the number of connected devices. The in-memory inbox keeps the latest notification per host, project and conversation, up to 100 groups. Each row includes its receipt time. The inbox requires a loopback Host header.
+- The menu sends the owner-only setup token and its PID in `X-AgentReminder-Menu-Pid` with `GET /inbox`. While that process is alive, new approvals can wait without a connected board. Setup-token authentication also enables approval actions in the response.
+- `POST /inbox/decision {id, decision: "allow"|"deny"|"skip"}` → responds to one active non-pairing card. Requires a loopback request and the owner-only setup token. Returns `{ok:false}` if the card was settled elsewhere or the requested action is unavailable. Display-only interactions accept only `skip`.
 - `POST /inbox/test {lang: "zh"|"en"}` → delivers a sample card to the local menu and its connected devices. Uses the loopback inbox guard and omits Tailnet fan-out.
 - `POST /inbox/read {ids: [...]}` → marks the listed notifications read. Reads do not settle approvals or affect boards.
 - `POST /inbox/clear {notifications: [...], approvals: [...]}` → dismisses the listed notifications across connected devices and Tailnet peers and hands the listed pending approvals back to their originating clients. The app sends the IDs it displayed, so cards arriving after that snapshot stay in the inbox.
@@ -55,7 +57,7 @@ Each frame starts with a two-byte big-endian payload length. The host and device
 - `POST /pair {}` → asks one connected USB device for confirmation, preferring an unpaired device when there is exactly one. On macOS, compatible firmware stores a Bluetooth enrollment key after confirmation. The daemon retains earlier board enrollments. Ordinary cards and decisions are restricted to registered USB devices and their authenticated Bluetooth links once at least one device is paired. The daemon broadcasts the first resolution to every ready link.
 - `GET /status`, `POST /raw` (broadcast as-is), `POST /shutdown`
 
-`decision: null` (no device, timeout, or the user tapped "终端") makes the hook print nothing, so the agent falls back to its normal approval flow.
+`decision: null` (no available receiver, timeout, or handoff to the agent) makes the hook print nothing, so the agent falls back to its normal approval flow.
 
 The default approval deadline is 300 seconds from receipt. The device displays the oldest approval and the total pending count. Each request keeps its own deadline while queued.
 
@@ -64,12 +66,20 @@ The default approval deadline is 300 seconds from receipt. The device displays t
 
 The optional Codex desktop launcher mirrors native command and file approvals
 through the App Server stdio proxy. It sends the request to the desktop before
-waiting for the same decision on the device. A desktop response or
-`serverRequest/resolved` aborts the matching `/approval` call, which closes the
-device card. A device choice sends a single native `accept` or `decline` response.
+waiting for the same decision in the menu bar or on a device. A desktop
+response or `serverRequest/resolved` aborts the matching `/approval` call,
+which closes the menu and device cards. A menu or device choice sends a single
+native `accept` or `decline` response.
 The AgentReminder permission hook exits early only in this launcher mode.
 
-The last device disconnecting cancels outstanding requests immediately. Heartbeats expire after 40 seconds without a device response. Approval IDs are UUIDs; reconnects replay only pending approvals with their remaining timeout. The device also expires stale approval cards locally if a cancellation cannot arrive.
+An active menu keeps ordinary requests pending after the last compatible device disconnects. With no available local receiver, the daemon hands those requests back. USB pairing always requires its target board. Device heartbeats expire after 40 seconds without a response. Approval IDs are UUIDs. Reconnects replay outstanding approvals with their remaining timeout. The device also expires stale approval cards locally if a cancellation cannot arrive.
+
+After an enrolled Bluetooth board completes its handshake, the host also
+replays up to the 20 latest unread notifications from its grouped inbox,
+oldest first, using their original IDs and receipt times. It paces writes and
+checks unread state again before each send so clearing or reading a card
+during replay takes effect. The wire format and firmware requirements stay
+the same.
 
 `conversation` is the current chat name; `reason` is the agent-provided approval message. `title` remains the tool name and `detail` the operation arguments. Session transcripts are inspected locally only for their title/first prompt, never forwarded wholesale.
 
@@ -102,10 +112,10 @@ to the two addresses. The receiving daemon gives the sender a single-use
 challenge for its signed `POST /v1/card` body. The key stays local.
 The local hook, pairing, shutdown, and raw endpoints stay on loopback.
 
-The originating daemon sends `{card, timeoutMs}` to each peer. A receiver sends
-the existing card to its local device without forwarding it further. The
-origin assigns the card ID and timestamp once. Approval HTTP requests remain
-open for the local device decision. The origin accepts one valid outcome,
+The originating daemon sends `{card, timeoutMs}` to each peer. A receiver
+shares the existing card with its menu and connected devices. The origin
+assigns the card ID and timestamp once. Approval HTTP requests remain open
+for a local menu or device decision. The origin accepts one valid outcome,
 closes the other requests, and clears its own card. A closed origin connection
 cancels incoming peer cards. Unreachable peers are skipped and new cards are
 not queued for offline peers.

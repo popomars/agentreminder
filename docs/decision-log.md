@@ -162,9 +162,18 @@ host, project, and conversation group, up to 100 groups. The app shows the
 latest notification and its reception time. The app uses the existing USB pairing endpoint and the
 same device confirmation as the command-line flow.
 
-The idle-sleep setting is opt-in. The macOS daemon holds an idle system sleep
-assertion through the system `caffeinate` utility. The utility watches the
-daemon's PID so it releases the assertion on daemon exit, including crashes.
+The macOS daemon uses the system `caffeinate` utility to hold an idle system
+sleep assertion. The utility watches the daemon's PID and releases the
+assertion on daemon exit, including crashes. Initially opt-in, the setting
+defaults to on in the 0.5.13 release and preserves an explicitly saved off preference.
+
+The authenticated menu process can hold and settle approvals independently of
+board availability. The daemon uses its process lifetime so throttling of GUI
+polling during screen lock does not interrupt a pending request. The desktop
+bridge still cancels the shared request when Codex resolves it.
+The Bluetooth handshake reuses the daemon's grouped inbox for reconnect
+delivery. Replay keeps each notification ID and respects the firmware's
+20-card capacity. Each send checks the inbox again for reads or dismissals.
 
 The AgentReminder login item also restores opt-in Codex Dock configuration.
 Launch migrates the older AgentReminder-owned Codex LaunchAgent, which

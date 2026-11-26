@@ -26,7 +26,9 @@ test('real hook processes → daemon → TCP device → agent-compatible JSON', 
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'agentreminder-flow-'));
   const sockets = new Set(), received = [];
   let decision = 'allow';
+  let acceptDevices = true;
   const device = net.createServer(sock => {
+    if (!acceptDevices) { sock.destroy(); return; }
     sockets.add(sock); sock.on('close', () => sockets.delete(sock)); let buf = '';
     sock.on('data', d => {
       buf += d; let i;
@@ -118,7 +120,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
     }] } });
   } else if (message.result) {
     send({ method: 'serverRequest/resolved', params: { requestId: message.id } });
-    send({ method: 'fixture/received', params: message.result });
+    send({ method: 'fixture/received', params: { ...message.result, requestId: message.id } });
   }
 });`, { mode: 0o700 });
   const proxy = spawn(process.execPath, [path.resolve(__dirname, '../codex-approval-proxy.js'), 'app-server'], {
@@ -214,6 +216,58 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   const dismissed = await inbox();
   assert.equal(dismissed.unread, 0);
   assert.deepEqual(dismissed.notifications, []);
+
+  const menuURL = `http://127.0.0.1:${httpPort}/inbox`;
+  const setup = fs.readFileSync(path.join(home, 'menu-setup.token'), 'utf8').trim();
+  const presence = { 'x-agentreminder-menu-pid': String(process.pid) };
+  const menuHeaders = { ...presence, 'x-agentreminder-setup': setup };
+  const menuInbox = () => fetch(menuURL, { headers: menuHeaders }).then(response => response.json());
+  const menuDecision = (id, decision, headers = menuHeaders) => fetch(menuURL + '/decision', {
+    method: 'POST', headers: { 'content-type': 'application/json', ...headers },
+    body: JSON.stringify({ id, decision }),
+  });
+  assert.equal((await menuInbox()).canResolveApprovals, true);
+  send({ method: 'fixture/trigger', params: { requestId: 103 } });
+  const beforeDisconnect = await approvalInMenu();
+  await until(() => received.some(message => message.t === 'approval' && message.id === beforeDisconnect.id));
+  assert.equal((await menuDecision(beforeDisconnect.id, 'allow', {})).status, 403);
+  assert.equal((await menuDecision(beforeDisconnect.id, 'allow', { ...menuHeaders, Origin: 'https://example.test' })).status, 403);
+  assert.equal((await menuDecision(beforeDisconnect.id, 'invalid')).status, 400);
+
+  acceptDevices = false;
+  for (const socket of sockets) socket.destroy();
+  for (let i = 0; i < 100 && (await inbox()).devices !== 0; i++) await sleep(20);
+  const disconnected = await menuInbox();
+  assert.equal(disconnected.devices, 0);
+  assert.equal(disconnected.approvals[0]?.id, beforeDisconnect.id);
+  assert.deepEqual(await (await menuDecision(beforeDisconnect.id, 'allow')).json(), { ok: true });
+  await until(() => desktop.some(m => m.method === 'fixture/received' && m.params.requestId === 103 && m.params.decision === 'accept'));
+  assert.deepEqual(await (await menuDecision(beforeDisconnect.id, 'deny')).json(), { ok: false });
+
+  send({ method: 'fixture/trigger', params: { requestId: 104 } });
+  const nativeApproval = await approvalInMenu();
+  assert.equal(nativeApproval.actionable, true);
+  assert.equal(nativeApproval.interaction, false);
+  send({ id: 104, result: { decision: 'decline' } });
+  await until(() => desktop.some(m => m.method === 'fixture/received' && m.params.requestId === 104 && m.params.decision === 'decline'));
+  for (let i = 0; i < 100 && (await inbox()).approvals.length; i++) await sleep(20);
+  assert.deepEqual((await menuInbox()).approvals, []);
+
+  send({ method: 'fixture/trigger-question', params: { requestId: 105 } });
+  const questionFromMenu = await approvalInMenu();
+  assert.deepEqual(questionFromMenu.choices, ['预览', '正式']);
+  assert.deepEqual(await (await menuDecision(questionFromMenu.id, 'deny')).json(), { ok: true });
+  await until(() => desktop.some(m => m.method === 'fixture/received' && m.params.requestId === 105 &&
+    m.params.answers?.environment?.answers[0] === '预览'));
+
+  async function approvalInMenu() {
+    for (let i = 0; i < 100; i++) {
+      const approval = (await menuInbox()).approvals[0];
+      if (approval) return approval;
+      await sleep(20);
+    }
+    assert.fail('Approval did not arrive in the menu');
+  }
 
   proxy.stdin.end();
 });
