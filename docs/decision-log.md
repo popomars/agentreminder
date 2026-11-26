@@ -133,7 +133,10 @@ run after the installing terminal closes. Upgrades replace the old bell
 without restarting the same-version daemon. The app starts or connects to
 the host daemon on loopback. Headless installations can use
 `--no-menu-bar`. Pairing, firmware and the local delivery test are in
-the bell menu.
+the bell menu. The installer registers AgentReminder as the macOS login item.
+When the menu launches, it restores opt-in Codex Dock configuration and
+migrates the older AgentReminder-owned Codex LaunchAgent that macOS showed
+as `sh`.
 The daemon owns unread counts and retains the latest notification in each
 host, project, and conversation group, up to 100 groups. The app shows the
 latest notification and its reception time. The app uses the existing USB pairing endpoint and the

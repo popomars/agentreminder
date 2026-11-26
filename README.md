@@ -24,7 +24,7 @@ curl -fsS -H 'Accept: application/vnd.github.raw+json' \
   bash agentreminder-install.sh --ref "$revision"
 ```
 
-安装完成后，点击菜单栏的 **AgentReminder 铃铛**。安装器把完整的 `AgentReminder.app` 放在用户的「应用程序」文件夹（`~/Applications`），并通过 macOS 启动。现在可以关掉终端。退出应用或重启 Mac 后，可从访达选择「前往 → 前往文件夹」，输入 `~/Applications`，双击 **AgentReminder**。
+安装完成后，点击菜单栏的 **AgentReminder 铃铛**。安装器把完整的 `AgentReminder.app` 放在用户的「应用程序」文件夹（`~/Applications`），并通过 macOS 启动。现在可以关掉终端。安装器默认注册 macOS 登录启动，可在铃铛的「登录时启动」查看或更改。退出应用后，可从访达选择「前往 → 前往文件夹」，输入 `~/Applications`，双击 **AgentReminder**。
 
 ### 2. 从铃铛配对设备
 
@@ -57,7 +57,8 @@ curl -fsS -H 'Accept: application/vnd.github.raw+json' \
 | **配对新设备…** | 通过 USB 添加或重新配对设备。 |
 | **安装或更新固件…** | 选择板型，从安装包写入固件。写入时保持 USB 连接。已经配对的设备重启后会重连。 |
 | **发送测试通知** | 快速验证菜单栏和本机设备是否能收卡。 |
-| **Codex 桌面双端审批** | 检测到支持的 ChatGPT 桌面安装时显示。可启用或停用转接，用原来的 Dock 图标重开即可生效。 |
+| **登录时启动** | 在 macOS「登录项与扩展」中显示为 AgentReminder。它启动铃铛和后台服务，并恢复已启用的 Codex Dock 配置。 |
+| **Codex 桌面双端审批** | 检测到支持的 ChatGPT 桌面安装时显示。可启用或停用转接，用原来的 Dock 图标重开即可生效。如果登录时 ChatGPT 比铃铛先打开，请重开 ChatGPT。 |
 
 设备一次显示一张审批，默认等待 5 分钟。两个预设选项可以在设备上选择。多选项、文字输入和登录验证可回原对话完成。微雪短按 PWR、Passport 竖放时短按下键，可把问题交回电脑。
 
@@ -69,7 +70,7 @@ curl -fsS -H 'Accept: application/vnd.github.raw+json' \
 
 ## 更新或卸载
 
-- **更新 Mac 应用和 hooks**。重新运行同一个安装脚本，会保留配对并打开新版铃铛。更新完成后重开 agent 以加载新 hooks。
+- **更新 Mac 应用和 hooks**。重新运行同一个安装脚本，会保留配对并打开新版铃铛。更新完成后重开 agent 以加载新 hooks。用 `--no-autostart` 安装时可跳过注册登录启动。
 - **更新设备固件**。从铃铛选择「安装或更新固件…」。
 - **卸载**。执行 `bash ~/.agentreminder/app/uninstall.sh`，移除应用、主机程序和安装器管理的 hooks，保留配对记录、日志及其他 hooks。
 

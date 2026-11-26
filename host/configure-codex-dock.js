@@ -12,7 +12,9 @@ const target = `${domain}/${label}`;
 const home = os.homedir();
 const agentDir = path.join(home, 'Library', 'LaunchAgents');
 const plist = path.join(agentDir, `${label}.plist`);
-const shim = path.join(home, '.agentreminder', 'dock-codex-cli');
+const state = path.join(home, '.agentreminder');
+const shim = path.join(state, 'dock-codex-cli');
+const enabledFile = path.join(state, 'codex-dock-enabled');
 const ownerMarker = '# Managed by AgentReminder Dock integration';
 const proxy = path.join(__dirname, 'codex-approval-proxy.js');
 const app = process.env.AGENTREMINDER_CODEX_APP || '/Applications/ChatGPT.app';
@@ -67,8 +69,41 @@ function findNode() {
   return process.execPath;
 }
 
-function xml(s) {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+function saveEnabled() {
+  writePrivate(enabledFile, ownerMarker + '\n', 0o600);
+}
+
+function editGuiEnvironment(...args) {
+  mustRun('asuser', String(process.getuid()), '/bin/launchctl', ...args);
+}
+
+function applyOverride() {
+  if (currentOverride()) return;
+  editGuiEnvironment('setenv', 'CODEX_CLI_PATH', shim);
+  if (currentOverride() !== shim) throw new Error('无法设置 Codex 的启动路径。');
+}
+
+function removeLegacyAgent(exists) {
+  if (running()) {
+    if (!exists) throw new Error(`发现同名登录项：${label}`);
+    mustRun('bootout', target);
+  }
+  if (exists) fs.unlinkSync(plist);
+}
+
+function restore() {
+  const enabled = owned(enabledFile);
+  const legacy = owned(plist);
+  if (!enabled && !legacy) return;
+  const hasShim = owned(shim);
+  if (legacy && !enabled && hasShim) {
+    const disabled = launchctl('print-disabled', domain);
+    if (disabled.status !== 0) throw new Error('无法读取旧版 Codex 登录项状态。');
+    const explicitlyDisabled = /^\s*"com\.agentreminder\.codex-dock"\s*=>\s*(disabled|true)\b/m.test(disabled.stdout);
+    if (!explicitlyDisabled && (running() || currentOverride() === shim)) saveEnabled();
+  }
+  if (hasShim && owned(enabledFile)) applyOverride();
+  if (legacy) removeLegacyAgent(legacy);
 }
 
 function install() {
@@ -79,22 +114,15 @@ function install() {
   fs.accessSync(cli, fs.constants.X_OK);
   fs.accessSync(proxy, fs.constants.R_OK);
   const shimExists = owned(shim);
-  const plistExists = owned(plist);
-  if (!plistExists && running()) throw new Error(`发现同名登录项：${label}`);
+  const legacy = owned(plist);
+  const enabled = owned(enabledFile);
+  if (!legacy && running()) throw new Error(`发现同名登录项：${label}`);
   const node = findNode();
   fs.mkdirSync(path.dirname(shim), { mode: 0o700, recursive: true });
-  fs.mkdirSync(agentDir, { recursive: true });
 
   const shimBody = `#!/bin/sh
 ${ownerMarker}
 set -eu
-if [ "\${1-}" = --agentreminder-set-dock-env ]; then
-  current=$(/bin/launchctl getenv CODEX_CLI_PATH || true)
-  if [ -z "$current" ] || [ "$current" = ${shellQuote(shim)} ]; then
-    exec /bin/launchctl setenv CODEX_CLI_PATH ${shellQuote(shim)}
-  fi
-  exit 0
-fi
 node=${shellQuote(node)}
 proxy=${shellQuote(proxy)}
 cli=${shellQuote(cli)}
@@ -104,62 +132,34 @@ if [ -x "$node" ] && [ -r "$proxy" ]; then
 fi
 exec "$cli" "$@"
 `;
-  const plistBody = `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- ${ownerMarker} -->
-<plist version="1.0">
-<dict>
-  <key>Label</key><string>${label}</string>
-  <key>LimitLoadToSessionType</key><string>Aqua</string>
-  <key>ProgramArguments</key>
-  <array><string>/bin/sh</string><string>${xml(shim)}</string><string>--agentreminder-set-dock-env</string></array>
-  <key>RunAtLoad</key><true/>
-</dict>
-</plist>
-`;
-
   try {
     writePrivate(shim, shimBody, 0o700);
-    if (!plistExists || fs.readFileSync(plist, 'utf8') !== plistBody) {
-      if (running()) mustRun('bootout', target);
-      writePrivate(plist, plistBody, 0o600);
-    }
-    if (!running()) mustRun('bootstrap', domain, plist);
-    if (currentOverride() !== shim) mustRun('kickstart', target);
-    for (let i = 0; i < 20 && currentOverride() !== shim; i++) {
-      spawnSync('/bin/sleep', ['0.1']);
-    }
-    if (currentOverride() !== shim) {
-      const info = launchctl('print', target).stdout?.match(/^\s*last exit code = .+$/m)?.[0].trim();
-      throw new Error(`登录项没有设置 Codex 的启动路径。${info ? `（${info}）` : ''}`);
-    }
+    applyOverride();
+    if (currentOverride() !== shim) throw new Error('CODEX_CLI_PATH 已有其他设置。');
+    if (!enabled) saveEnabled();
   } catch (error) {
-    // A failed first install should leave the ordinary Dock launch usable.
-    if (!plistExists) {
-      if (running()) launchctl('bootout', target);
-      if (currentOverride() === shim) launchctl('asuser', String(process.getuid()), '/bin/launchctl', 'unsetenv', 'CODEX_CLI_PATH');
-      fs.rmSync(plist, { force: true });
+    if (!enabled && override !== shim && currentOverride() === shim) {
+      editGuiEnvironment('unsetenv', 'CODEX_CLI_PATH');
     }
     if (!shimExists) fs.rmSync(shim, { force: true });
     throw error;
   }
+  if (legacy) removeLegacyAgent(legacy);
 }
 
 function uninstall() {
-  const plistExists = owned(plist);
+  const legacy = owned(plist);
   // Reject a file or job owned by something other than this script.
   owned(shim);
-  if (running()) {
-    if (!plistExists) throw new Error(`发现同名登录项：${label}`);
-    mustRun('bootout', target);
-  }
-  if (currentOverride() === shim) mustRun('asuser', String(process.getuid()), '/bin/launchctl', 'unsetenv', 'CODEX_CLI_PATH');
-  fs.rmSync(plist, { force: true });
+  const enabled = owned(enabledFile);
+  removeLegacyAgent(legacy);
+  if (currentOverride() === shim) editGuiEnvironment('unsetenv', 'CODEX_CLI_PATH');
+  if (enabled) fs.unlinkSync(enabledFile);
   // Keep the shim available to any already-running ChatGPT process until it exits.
 }
 
 function uninstallIfInstalled() {
-  if (process.platform !== 'darwin' || (!fs.existsSync(plist) && !fs.existsSync(shim))) return false;
+  if (process.platform !== 'darwin' || ![plist, shim, enabledFile].some(file => fs.existsSync(file))) return false;
   uninstall();
   return true;
 }
@@ -178,12 +178,15 @@ function main() {
         shim,
       }, null, 2));
       break;
+    case 'restore':
+      restore();
+      break;
     case 'uninstall':
       uninstall();
       console.log('已关闭。下次从 Dock 启动时会使用原来的配置。');
       break;
     default:
-      throw new Error('用法：node host/configure-codex-dock.js install|status|uninstall');
+      throw new Error('用法：node host/configure-codex-dock.js install|status|restore|uninstall');
   }
 }
 

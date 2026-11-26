@@ -10,6 +10,7 @@ pair=true
 menu_bar=false
 if [[ "$platform" == Darwin ]]; then menu_bar=true; fi
 install_hooks=true
+autostart=true
 flash=false
 board=
 flash_port=
@@ -18,8 +19,8 @@ lang=zh
 agents=()
 say() { if [[ "$lang" == en ]]; then printf '%s\n' "$2"; else printf '%s\n' "$1"; fi; }
 usage() {
-  say '用法：bash install.sh [--agent codex|claude|dsh] [--ref REF] [--flash [--board waveshare-amoled-2.16|folotoy-passport] [--port DEVICE] [--baud RATE]] [--menu-bar|--no-menu-bar] [--skip-hooks] [--no-pair] [--lang zh|en]' \
-      'Usage: bash install.sh [--agent codex|claude|dsh] [--ref REF] [--flash [--board waveshare-amoled-2.16|folotoy-passport] [--port DEVICE] [--baud RATE]] [--menu-bar|--no-menu-bar] [--skip-hooks] [--no-pair] [--lang zh|en]'
+  say '用法：bash install.sh [--agent codex|claude|dsh] [--ref REF] [--flash [--board waveshare-amoled-2.16|folotoy-passport] [--port DEVICE] [--baud RATE]] [--menu-bar|--no-menu-bar] [--skip-hooks] [--no-pair] [--no-autostart] [--lang zh|en]' \
+      'Usage: bash install.sh [--agent codex|claude|dsh] [--ref REF] [--flash [--board waveshare-amoled-2.16|folotoy-passport] [--port DEVICE] [--baud RATE]] [--menu-bar|--no-menu-bar] [--skip-hooks] [--no-pair] [--no-autostart] [--lang zh|en]'
 }
 while (( $# )); do
   case "$1" in
@@ -41,6 +42,7 @@ while (( $# )); do
     --no-menu-bar) menu_bar=false; shift;;
     --skip-hooks) install_hooks=false; shift;;
     --no-pair) pair=false; shift;;
+    --no-autostart) autostart=false; shift;;
     -h|--help) usage; exit 0;;
     *) usage >&2; exit 2;;
   esac
@@ -270,6 +272,7 @@ if "$menu_bar"; then
   fi
   rm -rf "$menu_stage/previous.app"
   launch_args=(--replace-existing)
+  if "$autostart" && [[ -z ${AGENTREMINDER_HOME:-} ]]; then launch_args+=(--register-login); fi
   if "$pair"; then launch_args+=(--setup-usb); fi
   if open -n "$menu_path" --args "${launch_args[@]}"; then
     say '请从菜单栏的 AgentReminder 铃铛开始配对或发送测试通知。' 'Open the AgentReminder bell in the menu bar to pair a device or send a test notification.'

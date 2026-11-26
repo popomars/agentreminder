@@ -94,7 +94,21 @@ function removeRuntime() {
       const installation = JSON.parse(fs.readFileSync(path.join(shortcut, 'Contents/Resources/Installation.json'), 'utf8'));
       managed = bundleID === 'io.github.popomars.agentreminder.menu' && installation.statePath === fs.realpathSync(HOME_DIR);
     } catch (_) { /* Leave unrelated applications alone. */ }
-    if (managed) fs.rmSync(shortcut, { recursive: true, force: true });
+    if (managed) {
+      let supportsLoginItem = false;
+      try {
+        supportsLoginItem = execFileSync('/usr/libexec/PlistBuddy',
+          ['-c', 'Print AgentReminderSupportsLoginItem', path.join(shortcut, 'Contents/Info.plist')],
+          { encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] }).trim() === 'true';
+      } catch (_) { /* Old bundles did not register login items. */ }
+      if (supportsLoginItem && fs.existsSync(path.join(HOME_DIR, 'login-item-registered'))) {
+        try {
+          execFileSync(path.join(shortcut, 'Contents/MacOS/AgentReminder'), ['--unregister-login'],
+            { timeout: 5000, stdio: 'ignore' });
+        } catch (_) { say('未能注销登录项。可在系统设置中移除。', 'Could not unregister the login item. Remove it in System Settings.'); }
+      }
+      fs.rmSync(shortcut, { recursive: true, force: true });
+    }
   }
   for (const file of installedFiles) fs.rmSync(path.join(installedDirs[0], file), { force: true });
   for (const dir of installedDirs.slice().reverse()) {

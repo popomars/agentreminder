@@ -237,7 +237,7 @@ test('macOS installs and launches the menu bar app by default', { skip: process.
 
   const app = path.join(state, 'app');
   assert(fs.lstatSync(bundle).isDirectory());
-  assert.deepEqual(fs.readFileSync(launched, 'utf8').trimEnd().split('\n'), ['-n', fs.realpathSync(bundle), '--args', '--replace-existing']);
+  assert.deepEqual(fs.readFileSync(launched, 'utf8').trimEnd().split('\n'), ['-n', fs.realpathSync(bundle), '--args', '--replace-existing', '--register-login']);
   await run('codesign', ['--verify', '--strict', bundle]);
   assert(fs.existsSync(path.join(app, 'flash.sh')));
   assert(fs.existsSync(path.join(app, 'firmware/release/waveshare-amoled-2.16/firmware.bin')));
