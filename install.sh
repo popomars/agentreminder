@@ -10,6 +10,7 @@ pair=true
 menu_bar=false
 if [[ "$platform" == Darwin ]]; then menu_bar=true; fi
 install_hooks=true
+init_tailnet=false
 autostart=true
 flash=false
 board=
@@ -20,8 +21,8 @@ agents=()
 auto_workbuddy=false
 say() { if [[ "$lang" == en ]]; then printf '%s\n' "$2"; else printf '%s\n' "$1"; fi; }
 usage() {
-  say '用法：bash install.sh [--agent codex|claude|dsh|workbuddy] [--ref REF] [--flash [--board waveshare-amoled-2.16|folotoy-passport] [--port DEVICE] [--baud RATE]] [--menu-bar|--no-menu-bar] [--skip-hooks] [--no-pair] [--no-autostart] [--lang zh|en]' \
-      'Usage: bash install.sh [--agent codex|claude|dsh|workbuddy] [--ref REF] [--flash [--board waveshare-amoled-2.16|folotoy-passport] [--port DEVICE] [--baud RATE]] [--menu-bar|--no-menu-bar] [--skip-hooks] [--no-pair] [--no-autostart] [--lang zh|en]'
+  say '用法：bash install.sh [--agent codex|claude|dsh|workbuddy] [--ref REF] [--flash [--board waveshare-amoled-2.16|folotoy-passport] [--port DEVICE] [--baud RATE]] [--menu-bar|--no-menu-bar] [--skip-hooks] [--no-pair] [--init-tailnet] [--no-autostart] [--lang zh|en]' \
+      'Usage: bash install.sh [--agent codex|claude|dsh|workbuddy] [--ref REF] [--flash [--board waveshare-amoled-2.16|folotoy-passport] [--port DEVICE] [--baud RATE]] [--menu-bar|--no-menu-bar] [--skip-hooks] [--no-pair] [--init-tailnet] [--no-autostart] [--lang zh|en]'
 }
 while (( $# )); do
   case "$1" in
@@ -43,6 +44,7 @@ while (( $# )); do
     --no-menu-bar) menu_bar=false; shift;;
     --skip-hooks) install_hooks=false; shift;;
     --no-pair) pair=false; shift;;
+    --init-tailnet) init_tailnet=true; shift;;
     --no-autostart) autostart=false; shift;;
     -h|--help) usage; exit 0;;
     *) usage >&2; exit 2;;
@@ -61,6 +63,10 @@ if "$menu_bar"; then
         'The menu bar app requires macOS 13 or later and Xcode Command Line Tools. For a headless install, add --no-menu-bar.' >&2
     exit 1
   fi
+fi
+if "$init_tailnet" && ! "$menu_bar"; then
+  say '--init-tailnet 需要 macOS 菜单栏应用。' '--init-tailnet requires the macOS menu bar app.' >&2
+  exit 2
 fi
 if "$flash" || "$menu_bar"; then
   command -v python3 >/dev/null && python3 -c "import hashlib, venv" || { say '刷机需要 Python 3。' 'Flashing requires Python 3.' >&2; exit 1; }
@@ -185,6 +191,10 @@ if "$menu_bar"; then
       cp "$source_dir/host/menu-bar/$file" "$stage/menu-bar/$file"
     fi
   done
+  if "$init_tailnet" && ! grep -Fq -- '--init-tailnet' "$stage/menu-bar/Main.swift"; then
+    say '所选版本不支持 --init-tailnet。' 'The selected revision does not support --init-tailnet.' >&2
+    exit 2
+  fi
   menu_app=AgentReminder.app
   legacy_menu="$(cd "$install_dir" && pwd -P)/$menu_app"
   menu_path="$legacy_menu"
@@ -216,11 +226,18 @@ if "$menu_bar"; then
   cp "$stage/menu-bar/Info.plist" "$menu_contents/Info.plist"
   xcrun swiftc -O -parse-as-library -target "$(uname -m)-apple-macos13" -module-cache-path "$stage/swift-cache" \
     "$stage/menu-bar/Main.swift" -o "$menu_contents/MacOS/AgentReminder"
-  node - "$(cd "$install_dir" && pwd -P)" "$lang" "$(command -v node)" "$(command -v python3)" > "$menu_contents/Resources/Installation.json" <<'JS'
+  installed_revision="$sha"
+  if [[ -z "$installed_revision" && -e "$source_dir/.git" ]] &&
+     checkout_changes="$(git -C "$source_dir" status --porcelain 2>/dev/null)" &&
+     [[ -z "$checkout_changes" ]]; then
+    installed_revision="$(git -C "$source_dir" rev-parse HEAD 2>/dev/null || true)"
+  fi
+  node - "$(cd "$install_dir" && pwd -P)" "$lang" "$(command -v node)" "$(command -v python3)" "$installed_revision" > "$menu_contents/Resources/Installation.json" <<'JS'
 const path = require('node:path');
-const [installDir, language, node, python] = process.argv.slice(2);
+const [installDir, language, node, python, revision] = process.argv.slice(2);
 console.log(JSON.stringify({
   node: path.resolve(node), python: path.resolve(python), statePath: path.resolve(installDir, '..'), language,
+  ...(/^[a-f0-9]{40}$/.test(revision) ? { revision } : {}),
 }));
 JS
   codesign --sign - "$stage/$menu_app"
@@ -289,6 +306,7 @@ if "$menu_bar"; then
   launch_args=(--replace-existing)
   if "$autostart" && [[ -z ${AGENTREMINDER_HOME:-} ]]; then launch_args+=(--register-login); fi
   if "$pair"; then launch_args+=(--setup-usb); fi
+  if "$init_tailnet"; then launch_args+=(--init-tailnet); fi
   if open -n "$menu_path" --args "${launch_args[@]}"; then
     say '请从菜单栏的 AgentReminder 铃铛开始配对或发送测试通知。' 'Open the AgentReminder bell in the menu bar to pair a device or send a test notification.'
     say "应用程序：$menu_path" "Application: $menu_path"
@@ -305,15 +323,17 @@ if ! "$menu_bar"; then
   if ! "$pair"; then say "连接设备后配对：node \"$host\" pair" "Pair after connecting by USB: node \"$host\" pair"; fi
 fi
 say "卸载主机服务：bash \"$install_dir/uninstall.sh\"" "Uninstall: bash \"$install_dir/uninstall.sh\" --lang en"
-for agent in ${agents[@]+"${agents[@]}"}; do
-  if [[ "$agent" == dsh ]]; then
-    say "dsh 需安装 Claude Code hooks 桥接，并将示例合并到所用 profile：$install_dir/integrations/dsh/cordis.patch.yml" \
-        "For dsh, install the Claude Code hooks bridge and merge this example into your profile: $install_dir/integrations/dsh/cordis.patch.yml"
-  elif [[ "$agent" == codex ]]; then
-    say '重开 Codex，并用 /hooks 审核及信任 AgentReminder 的 hooks。' \
-        'Reopen Codex and use /hooks to review and trust AgentReminder hooks.'
-  elif [[ "$agent" == workbuddy ]]; then
-    say '请重开 WorkBuddy，以加载任务完成通知。命令审批仍在 WorkBuddy 确认。' \
-        'Reopen WorkBuddy to load completion notifications. Confirm command approvals in WorkBuddy.'
-  fi
-done
+if "$install_hooks"; then
+  for agent in ${agents[@]+"${agents[@]}"}; do
+    if [[ "$agent" == dsh ]]; then
+      say "dsh 需安装 Claude Code hooks 桥接，并将示例合并到所用 profile：$install_dir/integrations/dsh/cordis.patch.yml" \
+          "For dsh, install the Claude Code hooks bridge and merge this example into your profile: $install_dir/integrations/dsh/cordis.patch.yml"
+    elif [[ "$agent" == codex ]]; then
+      say '重开 Codex，并用 /hooks 审核及信任 AgentReminder 的 hooks。' \
+          'Reopen Codex and use /hooks to review and trust AgentReminder hooks.'
+    elif [[ "$agent" == workbuddy ]]; then
+      say '请重开 WorkBuddy，以加载任务完成通知。命令审批仍在 WorkBuddy 确认。' \
+          'Reopen WorkBuddy to load completion notifications. Confirm command approvals in WorkBuddy.'
+    fi
+  done
+fi

@@ -120,7 +120,12 @@ Every participating computer runs the same daemon and connects directly to its
 peer list, discovered through Tailscale by default. Both peers prove possession
 of the shared key before any card is sent. The source daemon owns the response
 to its agent. Receivers serve cards locally without forwarding them. A separate
-Tailnet listener keeps hook administration and pairing on loopback.
+Tailnet listener keeps hook administration and pairing on loopback. The macOS
+Tailnet service menu exposes initialization, joining, and key viewing as
+separate actions. The optional installer flag opens initialization. The
+daemon activates the mesh in place and retains its inbox and pending
+approvals. Group keys stay in private local configuration and can be
+copied during initialization or from the key dialog.
 
 ### ADR-0008: Show AgentReminder in the macOS menu bar
 
@@ -133,14 +138,20 @@ run after the installing terminal closes. Upgrades replace the old bell
 without restarting the same-version daemon. The app starts or connects to
 the host daemon on loopback. Headless installations can use
 `--no-menu-bar`. Pairing, firmware and the local delivery test are in
-the bell menu. The installer registers AgentReminder as the macOS login item.
-When the menu launches, it restores opt-in Codex Dock configuration and
-migrates the older AgentReminder-owned Codex LaunchAgent that macOS showed
-as `sh`.
+the bell menu. The installer registers the macOS login item by default.
+The menu checks the published application version and revision on GitHub.
+Agent integrations shows Codex Dock configuration alongside the Claude Code,
+dsh and WorkBuddy hooks. Hook switches gate local forwarding at runtime and
+preserve existing third-party settings. Codex applies its configuration the
+next time ChatGPT opens.
 The daemon owns unread counts and retains the latest notification in each
 host, project, and conversation group, up to 100 groups. The app shows the
 latest notification and its reception time. The app uses the existing USB pairing endpoint and the
 same device confirmation as the command-line flow.
+
+The AgentReminder login item also restores opt-in Codex Dock configuration.
+Launch migrates the older AgentReminder-owned Codex LaunchAgent, which
+macOS displayed as `sh`, into the menu app's startup.
 
 ### ADR-0009: Share the ES8311 notification player across boards
 

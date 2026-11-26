@@ -4,12 +4,14 @@ import ServiceManagement
 private struct Installation: Decodable {
     let node: String
     let python: String?
+    let revision: String?
     let statePath: String
     let language: String
 
     var stateDirectory: URL { URL(fileURLWithPath: statePath, isDirectory: true) }
 
     var loginItemMarker: URL { stateDirectory.appendingPathComponent("login-item-registered") }
+    var configFile: URL { stateDirectory.appendingPathComponent("config.json") }
     var host: URL { stateDirectory.appendingPathComponent("app/host/agentreminder.js") }
     var flashScript: URL { stateDirectory.appendingPathComponent("app/flash.sh") }
     var legacyApp: URL { stateDirectory.appendingPathComponent("app/AgentReminder.app") }
@@ -35,8 +37,7 @@ private struct Installation: Decodable {
     }
 
     var endpoint: URL {
-        let file = stateDirectory.appendingPathComponent("config.json")
-        let settings = (try? Data(contentsOf: file))
+        let settings = (try? Data(contentsOf: configFile))
             .flatMap { try? JSONDecoder().decode(Settings.self, from: $0) }
         var url = URLComponents()
         url.scheme = "http"
@@ -46,7 +47,18 @@ private struct Installation: Decodable {
         return url.url!
     }
 
-    private struct Settings: Decodable { let httpPort: Int? }
+    var tailnetKey: String? {
+        let key = (try? Data(contentsOf: configFile))
+            .flatMap { try? JSONDecoder().decode(Settings.self, from: $0) }?.tailnet?.key
+        guard let key, key.count == 64, key.range(of: "^[0-9a-fA-F]{64}$", options: .regularExpression) != nil else { return nil }
+        return key
+    }
+
+    private struct Settings: Decodable {
+        struct Tailnet: Decodable { let key: String? }
+        let httpPort: Int?
+        let tailnet: Tailnet?
+    }
 }
 
 private struct Card: Decodable {
@@ -74,6 +86,9 @@ private struct Inbox: Decodable {
     let canClear: Bool?
     let canUpdateFirmware: Bool?
     let canSendTest: Bool?
+    let canInitializeTailnet: Bool?
+    let tailnetConfigured: Bool?
+    let tailnetListening: Bool?
     let canManageIntegrations: Bool?
     let agentIntegrations: [String: String]?
 }
@@ -85,8 +100,21 @@ private struct Pairing: Decodable {
 }
 
 private struct ReadResult: Decodable { let ok: Bool }
-private struct AgentIntegrationResult: Decodable { let status: String; let installedHooks: Bool? }
 private struct TestResult: Decodable { let delivered: Int }
+private struct TailnetSetupResult: Decodable { let ok: Bool?; let error: String? }
+private struct CodexDockStatus: Decodable { let dockOverrideActive: Bool }
+private struct AgentIntegrationResult: Decodable { let status: String; let installedHooks: Bool? }
+private enum AgentIntegration: String, CaseIterable {
+    case codex, claude, dsh, workbuddy
+
+    struct Action {
+        let agent: AgentIntegration
+        let enabled: Bool
+    }
+}
+
+private enum IntegrationStatus: String { case enabled, disabled, unconfigured, unavailable }
+private enum TailnetSetupMode: String { case create, join }
 
 private enum FirmwareBoard: String, CaseIterable {
     case waveshare = "waveshare-amoled-2.16"
@@ -132,7 +160,13 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var pairing = false
     private var setupUsb = ProcessInfo.processInfo.arguments.contains("--setup-usb")
     private var configuringCodex = false
-    private var updatingWorkBuddy = false
+    private var codexDockStatus: CodexDockStatus?
+    private var codexStatusCheck: Task<Void, Never>?
+    private var codexMenuItem: NSMenuItem?
+    private var configuringTailnet = false
+    private var updatingHookAgents: Set<AgentIntegration> = []
+    private var checkingUpdates = false
+    private var initTailnetOnLaunch = ProcessInfo.processInfo.arguments.contains("--init-tailnet")
     private var trackingMenu = false
     private var firmwareUpdate: FirmwareUpdate?
 
@@ -205,12 +239,13 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     }
                 } catch { NSLog("AgentReminder could not run Codex Dock setup: %@", error.localizedDescription) }
             }
+            refreshCodexStatus()
         }
         if ProcessInfo.processInfo.arguments.contains("--register-login"),
            !UserDefaults.standard.bool(forKey: "AgentReminderLoginItemOptOut") {
             registerAtLogin()
         }
-        if setupUsb { startService(force: true) }
+        startService(force: true)
         refresh()
         timer = Timer(timeInterval: 2, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
@@ -226,14 +261,15 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         request.timeoutInterval = timeout
         request.httpBody = body
         if method == "POST" { request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
-        if path == "agent-integrations" {
+        if path == "tailnet/setup" || path == "agent-integrations" {
             let tokenFile = installation.stateDirectory.appendingPathComponent("menu-setup.token")
             let token = try String(contentsOf: tokenFile, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
             request.setValue(token, forHTTPHeaderField: "X-AgentReminder-Setup")
         }
         let (data, response) = try await session.data(for: request)
         guard let http = response as? HTTPURLResponse,
-              (200..<300).contains(http.statusCode) || (path == "pair" && http.statusCode == 409)
+              (200..<300).contains(http.statusCode) || (path == "pair" && http.statusCode == 409) ||
+                (path == "tailnet/setup" && [400, 409].contains(http.statusCode))
         else { throw URLError(.badServerResponse) }
         return try JSONDecoder().decode(T.self, from: data)
     }
@@ -249,7 +285,14 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
             defer { refreshing = false }
             do {
                 inbox = try await request("inbox")
-                if inbox?.canSendTest != true { startService() }
+                if inbox?.canManageIntegrations == nil || inbox?.canInitializeTailnet == nil { startService() }
+                if initTailnetOnLaunch && inbox?.canInitializeTailnet == true {
+                    initTailnetOnLaunch = false
+                    Task {
+                        if inbox?.tailnetConfigured == true { showTailnetKey() }
+                        else { initializeTailnet() }
+                    }
+                }
             }
             catch {
                 inbox = nil
@@ -332,10 +375,13 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        firmwareUpdate == nil && !pairing && !configuringCodex ? .terminateNow : .terminateCancel
+        firmwareUpdate == nil && !pairing && !configuringCodex && !configuringTailnet ? .terminateNow : .terminateCancel
     }
 
-    func menuWillOpen(_ menu: NSMenu) { trackingMenu = true }
+    func menuWillOpen(_ menu: NSMenu) {
+        trackingMenu = true
+        refreshCodexStatus()
+    }
 
     func menuDidClose(_ menu: NSMenu) {
         trackingMenu = false
@@ -345,6 +391,7 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func redraw() {
         guard !trackingMenu else { return }
         menu.removeAllItems()
+        codexMenuItem = nil
         if let inbox {
             item.button?.title = label("通知 \(inbox.unread) · 审批 \(inbox.approvals.count)",
                                        "\(inbox.unread) new · \(inbox.approvals.count) approvals")
@@ -369,19 +416,8 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         menu.addItem(action(label("发送测试通知", "Send test notification"), #selector(sendTest),
                             enabled: inbox?.canSendTest == true && firmwareUpdate == nil))
-        addWorkBuddyIntegration()
-        if installation.codexApp != nil {
-            let codex = action(label("Codex 桌面双端审批", "Codex Desktop approvals"))
-            let options = NSMenu(title: codex.title)
-            options.autoenablesItems = false
-            for (title, command) in [(label("启用…", "Enable…"), "install"), (label("停用…", "Disable…"), "uninstall")] {
-                let option = action(title, #selector(configureCodex(_:)), enabled: !configuringCodex)
-                option.representedObject = command
-                options.addItem(option)
-            }
-            codex.submenu = options
-            menu.addItem(codex)
-        }
+        addTailnetMenu()
+        addAgentIntegrations()
         menu.addItem(.separator())
         let login = action(label("登录时启动", "Launch at login"), #selector(toggleLoginItem))
         switch SMAppService.mainApp.status {
@@ -390,66 +426,13 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         default: break
         }
         menu.addItem(login)
+        menu.addItem(action(label("检查更新…", "Check for updates…"), #selector(checkForUpdates),
+                            enabled: !checkingUpdates))
         menu.addItem(action(label("退出菜单栏应用", "Quit menu bar app"), #selector(quit), enabled: firmwareUpdate == nil))
     }
 
     @objc private func retry() { startService(force: true) }
     @objc private func quit() { NSApp.terminate(nil) }
-
-    private func addWorkBuddyIntegration() {
-        let state = inbox?.agentIntegrations?["workbuddy"]
-        let status: String
-        switch state {
-        case "enabled": status = label("已启用", "Enabled")
-        case "disabled": status = label("已停用", "Disabled")
-        case "unconfigured": status = label("待配置", "Not configured")
-        default: status = label("状态不可用", "Status unavailable")
-        }
-        let integrations = action(label("Agent 接入", "Agent integrations"))
-        let agents = NSMenu(title: integrations.title)
-        let workbuddy = action("WorkBuddy · \(status)")
-        let options = NSMenu(title: "WorkBuddy")
-        options.autoenablesItems = false
-        let ready = inbox?.canManageIntegrations == true && !updatingWorkBuddy
-        for enabled in [true, false] {
-            let option = action(enabled ? label("启用", "Enable") : label("停用", "Disable"),
-                                #selector(toggleWorkBuddy(_:)), enabled: ready)
-            option.state = state == (enabled ? "enabled" : "disabled") ? .on : .off
-            option.representedObject = enabled
-            options.addItem(option)
-        }
-        options.addItem(.separator())
-        options.addItem(action(label("命令审批请回 WorkBuddy 确认", "Confirm command approvals in WorkBuddy"),
-                               enabled: false))
-        workbuddy.submenu = options
-        agents.addItem(workbuddy)
-        integrations.submenu = agents
-        menu.addItem(integrations)
-    }
-
-    @objc private func toggleWorkBuddy(_ sender: NSMenuItem) {
-        guard inbox?.canManageIntegrations == true, !updatingWorkBuddy,
-              let enabled = sender.representedObject as? Bool else { return }
-        updatingWorkBuddy = true
-        redraw()
-        Task {
-            defer { updatingWorkBuddy = false; refresh(); redraw() }
-            do {
-                let body = try JSONSerialization.data(withJSONObject: ["agent": "workbuddy", "enabled": enabled])
-                let result: AgentIntegrationResult = try await request("agent-integrations", method: "POST", body: body)
-                guard result.status == (enabled ? "enabled" : "disabled") else { throw URLError(.badServerResponse) }
-                if result.installedHooks == true {
-                    showAlert(label("已配置 WorkBuddy", "WorkBuddy configured"),
-                              label("请重开 WorkBuddy。设备会收到任务完成通知和命令待确认提醒。",
-                                    "Reopen WorkBuddy to receive task completions and command approval reminders on your device."))
-                }
-            } catch {
-                showAlert(label("无法更新 WorkBuddy 接入", "Could not update WorkBuddy"),
-                          label("请检查本机服务和 WorkBuddy 的 hook 配置后重试。",
-                                "Check the local service and the WorkBuddy hook configuration, then try again."))
-            }
-        }
-    }
 
     private func registerAtLogin() {
         let service = SMAppService.mainApp
@@ -488,6 +471,63 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         redraw()
     }
 
+    private func fetchUpdateMetadata(_ path: String, accept: String) async throws -> Data {
+        let url = URL(string: "https://api.github.com/repos/popomars/agentreminder/\(path)")!
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 12
+        request.setValue(accept, forHTTPHeaderField: "Accept")
+        let (data, result) = try await URLSession.shared.data(for: request)
+        guard let response = result as? HTTPURLResponse, response.statusCode == 200 else {
+            throw URLError(.badServerResponse)
+        }
+        return data
+    }
+
+    @objc private func checkForUpdates() {
+        guard !checkingUpdates else { return }
+        checkingUpdates = true
+        redraw()
+        Task {
+            defer { checkingUpdates = false; redraw() }
+            do {
+                let data = try await fetchUpdateMetadata("commits/main", accept: "application/vnd.github.sha")
+                let revision = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
+                guard revision.range(of: "^[0-9a-f]{40}$", options: .regularExpression) != nil else {
+                    throw URLError(.cannotDecodeContentData)
+                }
+                let localVersion = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? ""
+                let plist = try await fetchUpdateMetadata("contents/host/menu-bar/Info.plist?ref=\(revision)",
+                                                          accept: "application/vnd.github.raw+json")
+                let values = try PropertyListSerialization.propertyList(from: plist, format: nil) as? [String: Any]
+                guard let remoteVersion = values?["CFBundleShortVersionString"] as? String else {
+                    throw URLError(.cannotDecodeContentData)
+                }
+                let order = remoteVersion.compare(localVersion, options: .numeric)
+                let sameVersionDifferentCommit = order == .orderedSame && installation.revision.map { $0 != revision } == true
+                if order == .orderedAscending || (order == .orderedSame && !sameVersionDifferentCommit) {
+                    showAlert(label("当前版本已是最新", "AgentReminder is up to date"),
+                              label("本机 \(localVersion) · GitHub \(remoteVersion)", "Installed \(localVersion) · GitHub \(remoteVersion)"))
+                    return
+                }
+                let alert = NSAlert()
+                alert.messageText = sameVersionDifferentCommit
+                    ? label("GitHub main 有不同提交", "GitHub main has a different revision")
+                    : label("发现 AgentReminder \(remoteVersion)", "AgentReminder \(remoteVersion) is available")
+                alert.informativeText = label("可从 GitHub 查看新版安装说明。", "See GitHub for the latest installation instructions.")
+                alert.addButton(withTitle: label("稍后", "Later"))
+                alert.addButton(withTitle: label("查看安装说明", "View installation instructions"))
+                NSApp.activate(ignoringOtherApps: true)
+                if alert.runModal() == .alertSecondButtonReturn,
+                   let url = URL(string: "https://github.com/popomars/agentreminder/tree/\(revision)") {
+                    NSWorkspace.shared.open(url)
+                }
+            } catch {
+                showAlert(label("无法检查更新", "Could not check for updates"),
+                          label("无法读取 GitHub 版本，请稍后重试。", "Could not read the GitHub version. Try again later."))
+            }
+        }
+    }
+
     @objc private func sendTest() {
         Task {
             do {
@@ -504,6 +544,234 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
                           label("请检查铃铛是否已连接本机服务。", "Check the bell’s connection to the local service."))
             }
         }
+    }
+
+    private var canSetUpTailnet: Bool {
+        inbox?.canInitializeTailnet == true && inbox?.tailnetConfigured == false && !configuringTailnet
+    }
+
+    private func addTailnetMenu() {
+        let entry = action(label("联机服务", "Tailnet service"))
+        let options = NSMenu(title: entry.title)
+        options.autoenablesItems = false
+        options.addItem(action(label("初始化…", "Initialize…"), #selector(initializeTailnet), enabled: canSetUpTailnet))
+        options.addItem(action(label("加入联机服务…", "Join Tailnet service…"), #selector(joinTailnet), enabled: canSetUpTailnet))
+        options.addItem(action(label("查看联机密钥…", "View shared key…"), #selector(showTailnetKey),
+                               enabled: !configuringTailnet && installation.tailnetKey != nil))
+        entry.submenu = options
+        menu.addItem(entry)
+    }
+
+    @objc private func showTailnetKey() {
+        guard !configuringTailnet, let key = installation.tailnetKey else { return }
+        let alert = NSAlert()
+        alert.messageText = label("联机密钥", "Tailnet shared key")
+        alert.informativeText = inbox?.tailnetConfigured == true && inbox?.tailnetListening == false
+            ? label("密钥已保存。请确认 Tailscale 已连接。", "The key is saved. Check that Tailscale is connected.")
+            : label("其他 Mac 可以用这把密钥加入同一联机服务。",
+                    "Use this key to join the same Tailnet service from another Mac.")
+        alert.addButton(withTitle: label("完成", "Done"))
+        alert.addButton(withTitle: label("复制密钥", "Copy key"))
+        let field = NSTextField(labelWithString: key)
+        field.isSelectable = true
+        field.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+        field.sizeToFit()
+        alert.accessoryView = field
+        NSApp.activate(ignoringOtherApps: true)
+        if alert.runModal() == .alertSecondButtonReturn { _ = copyTailnetKey(key) }
+    }
+
+    private func copyTailnetKey(_ key: String) -> Bool {
+        NSPasteboard.general.clearContents()
+        return NSPasteboard.general.setString(key, forType: .string)
+    }
+
+    @objc private func initializeTailnet() {
+        guard canSetUpTailnet else { return }
+        let alert = NSAlert()
+        alert.messageText = label("初始化联机服务", "Initialize Tailnet service")
+        alert.informativeText = label("在第一台 Mac 生成并保存共享密钥。其他 Mac 可用这把密钥加入。",
+                                      "Generate and save a shared key on the first Mac. Use it to join from the other Macs.")
+        alert.addButton(withTitle: label("取消", "Cancel"))
+        alert.addButton(withTitle: label("初始化", "Initialize"))
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertSecondButtonReturn else { return }
+        configureTailnet(.create)
+    }
+
+    @objc private func joinTailnet() {
+        guard canSetUpTailnet else { return }
+        let alert = NSAlert()
+        alert.messageText = label("加入联机服务", "Join Tailnet service")
+        alert.informativeText = label("粘贴已加入联机服务的 Mac 上的共享密钥。",
+                                      "Paste the shared key from a Mac that has already joined.")
+        let input = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 336, height: 26))
+        alert.accessoryView = input
+        alert.addButton(withTitle: label("取消", "Cancel"))
+        alert.addButton(withTitle: label("加入", "Join"))
+        alert.window.initialFirstResponder = input
+        NSApp.activate(ignoringOtherApps: true)
+        guard alert.runModal() == .alertSecondButtonReturn else { return }
+        configureTailnet(.join, key: input.stringValue)
+    }
+
+    private func configureTailnet(_ mode: TailnetSetupMode, key: String? = nil) {
+        guard canSetUpTailnet else { return }
+        configuringTailnet = true
+        redraw()
+        Task {
+            defer { configuringTailnet = false; refresh(); redraw() }
+            do {
+                var setup = ["mode": mode.rawValue]
+                setup["key"] = key
+                let body = try JSONEncoder().encode(setup)
+                let result: TailnetSetupResult = try await request("tailnet/setup", method: "POST", body: body)
+                if result.ok == true {
+                    if let latest: Inbox = try? await request("inbox") { inbox = latest }
+                    let copied = mode == .create && installation.tailnetKey.map(copyTailnetKey) == true
+                    let title = mode == .create ? label("联机服务已初始化", "Tailnet service initialized")
+                                                : label("已加入联机服务", "Joined Tailnet service")
+                    let message = copied
+                        ? label("共享密钥已保存并复制。连接 Tailscale 后会自动发现同组电脑。",
+                                "The shared key was saved and copied. Group members are discovered when Tailscale is connected.")
+                        : label("共享密钥已保存在本机。连接 Tailscale 后会自动发现同组电脑。",
+                                "The shared key is saved on this Mac. Group members are discovered when Tailscale is connected.")
+                    showAlert(title, message)
+                } else if result.error == "invalid-key" {
+                    showAlert(label("共享密钥格式有误", "Invalid shared key"),
+                              label("请粘贴 64 位十六进制密钥。", "Paste the 64-character hexadecimal key."))
+                } else if result.error == "already-configured" {
+                    showAlert(label("联机服务已配置", "Tailnet service is already configured"),
+                              label("可从「联机服务 → 查看联机密钥」打开现有密钥。",
+                                    "Open the current key under Tailnet service → View shared key."))
+                } else {
+                    throw URLError(.badServerResponse)
+                }
+            } catch {
+                showAlert(label("无法配置联机服务", "Could not configure Tailnet service"),
+                          label("请检查本机服务是否正常，再从铃铛重试。", "Check the local service and retry from the bell menu."))
+            }
+        }
+    }
+
+    private func integrationTitle(_ agent: AgentIntegration) -> String {
+        switch agent {
+        case .codex: return label("Codex 双端审批", "Codex Desktop approvals")
+        case .claude: return "Claude Code"
+        case .dsh: return "dsh"
+        case .workbuddy: return "WorkBuddy"
+        }
+    }
+
+    private func integrationStatusLabel(_ state: IntegrationStatus) -> String {
+        switch state {
+        case .enabled: return label("已启动", "Enabled")
+        case .disabled: return label("已停用", "Disabled")
+        case .unconfigured: return label("待配置", "Not configured")
+        case .unavailable: return label("状态不可用", "Status unavailable")
+        }
+    }
+
+    private func addAgentIntegrations() {
+        let entry = action(label("Agent 接入", "Agent integrations"))
+        let agents = NSMenu(title: entry.title)
+        agents.autoenablesItems = false
+        for agent in AgentIntegration.allCases {
+            let name = integrationTitle(agent)
+            let row = action(name)
+            let options = NSMenu(title: name)
+            options.autoenablesItems = false
+            for enabled in [true, false] {
+                let option = action(enabled ? label("启用", "Enable") : label("停用", "Disable"), #selector(toggleAgent(_:)))
+                option.representedObject = AgentIntegration.Action(agent: agent, enabled: enabled)
+                options.addItem(option)
+            }
+            let hint: String?
+            switch agent {
+            case .codex:
+                hint = installation.codexApp == nil
+                    ? label("需要支持的 ChatGPT 桌面端", "Requires a supported ChatGPT Desktop installation")
+                    : label("更改后需要重新打开 ChatGPT", "Reopen ChatGPT after changing this setting")
+            case .claude: hint = nil
+            case .dsh: hint = label("需在 dsh profile 中加载 hooks 桥接", "Requires the hooks bridge in the dsh profile")
+            case .workbuddy: hint = label("命令审批请回 WorkBuddy 确认", "Confirm command approvals in WorkBuddy")
+            }
+            if let hint {
+                options.addItem(.separator())
+                options.addItem(action(hint, enabled: false))
+            }
+            row.submenu = options
+            updateAgentMenuItem(row, agent: agent)
+            agents.addItem(row)
+            if agent == .codex { codexMenuItem = row }
+        }
+        entry.submenu = agents
+        menu.addItem(entry)
+    }
+
+    private func updateAgentMenuItem(_ row: NSMenuItem, agent: AgentIntegration) {
+        let state: IntegrationStatus
+        let ready: Bool
+        if agent == .codex {
+            state = codexDockStatus.map { $0.dockOverrideActive ? .enabled : .disabled } ?? .unavailable
+            ready = installation.codexApp != nil && !configuringCodex
+        } else {
+            state = inbox?.agentIntegrations?[agent.rawValue].flatMap(IntegrationStatus.init(rawValue:)) ?? .unavailable
+            ready = inbox?.canManageIntegrations == true && !updatingHookAgents.contains(agent)
+        }
+        row.title = "\(integrationTitle(agent)) · \(integrationStatusLabel(state))"
+        for option in row.submenu?.items ?? [] {
+            guard let action = option.representedObject as? AgentIntegration.Action else { continue }
+            option.state = state == (action.enabled ? .enabled : .disabled) ? .on : .off
+            option.isEnabled = ready
+        }
+    }
+
+    @objc private func toggleAgent(_ sender: NSMenuItem) {
+        guard let action = sender.representedObject as? AgentIntegration.Action else { return }
+        if action.agent == .codex { configureCodex(enabled: action.enabled) }
+        else { toggleHookAgent(action) }
+    }
+
+    private func toggleHookAgent(_ action: AgentIntegration.Action) {
+        let agent = action.agent
+        guard inbox?.canManageIntegrations == true, updatingHookAgents.insert(agent).inserted else { return }
+        let name = integrationTitle(agent)
+        let firstSetup = inbox?.agentIntegrations?[agent.rawValue] == "unconfigured"
+        redraw()
+        Task {
+            defer { updatingHookAgents.remove(agent); refresh(); redraw() }
+            do {
+                let body = try JSONSerialization.data(withJSONObject: ["agent": agent.rawValue, "enabled": action.enabled])
+                let result: AgentIntegrationResult = try await request("agent-integrations", method: "POST", body: body, timeout: 6)
+                guard result.status == (action.enabled ? "enabled" : "disabled") else {
+                    throw URLError(.badServerResponse)
+                }
+                if action.enabled && (result.installedHooks ?? firstSetup) {
+                    let detail: String
+                    switch agent {
+                    case .claude:
+                        detail = label("Hooks 已写入。请开启新的 Claude Code 会话。", "Hooks are installed. Start a new Claude Code session.")
+                    case .dsh:
+                        detail = label("已生成 dsh-hooks.json。请在 dsh profile 中配置 Claude Code hooks 桥接。",
+                                       "dsh-hooks.json is ready. Configure the Claude Code hooks bridge in your dsh profile.")
+                    case .workbuddy:
+                        detail = label("请重开 WorkBuddy。设备会收到任务完成通知和命令待确认提醒。",
+                                       "Reopen WorkBuddy to receive task completions and command approval reminders on your device.")
+                    case .codex: return
+                    }
+                    showAlert("\(name) · \(integrationStatusLabel(.enabled))", detail)
+                }
+            } catch {
+                showAlert(label("无法更新 \(name) 接入", "Could not update \(name)"),
+                          label("请检查本机服务和 Agent 的 hook 配置后重试。",
+                                "Check the local service and the agent’s hook configuration, then try again."))
+            }
+        }
+    }
+
+    private func updateCodexMenuState() {
+        if let codexMenuItem { updateAgentMenuItem(codexMenuItem, agent: .codex) }
     }
 
     private func runCodexSetup(_ command: String, app: URL? = nil) async throws -> (exitCode: Int32, output: Data) {
@@ -531,37 +799,70 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    @objc private func configureCodex(_ sender: NSMenuItem) {
-        guard !configuringCodex, let command = sender.representedObject as? String,
-              let app = installation.codexApp else { return }
-        let enable = command == "install"
-        let restartMessage = label("配置完成后，完全退出 ChatGPT，再从原来的 Dock 图标打开。",
-                                   "After applying this setting, quit ChatGPT and reopen it from the usual Dock icon.")
-        let alert = NSAlert()
-        alert.messageText = enable ? label("启用 Codex 双端审批？", "Enable Codex Desktop approvals?")
-                                   : label("停用 Codex 双端审批？", "Disable Codex Desktop approvals?")
-        alert.informativeText = restartMessage
-        alert.addButton(withTitle: label("取消", "Cancel"))
-        alert.addButton(withTitle: label("应用", "Apply"))
-        NSApp.activate(ignoringOtherApps: true)
-        guard alert.runModal() == .alertSecondButtonReturn else { return }
+    private func readCodexStatus(app: URL) async -> CodexDockStatus? {
+        guard let result = try? await runCodexSetup("status", app: app), result.exitCode == 0 else { return nil }
+        return try? JSONDecoder().decode(CodexDockStatus.self, from: result.output)
+    }
 
+    private func refreshCodexStatus() {
+        guard !configuringCodex, let app = installation.codexApp else { return }
+        codexStatusCheck?.cancel()
+        codexStatusCheck = Task {
+            let status = await readCodexStatus(app: app)
+            guard !Task.isCancelled else { return }
+            codexDockStatus = status
+            updateCodexMenuState()
+        }
+    }
+
+    private func configureCodex(enabled: Bool) {
+        guard !configuringCodex, let app = installation.codexApp else { return }
+        let command = enabled ? "install" : "uninstall"
         configuringCodex = true
-        redraw()
+        codexStatusCheck?.cancel()
+        updateCodexMenuState()
         Task {
-            defer { configuringCodex = false; redraw() }
+            defer { configuringCodex = false; updateCodexMenuState() }
             do {
                 let result = try await runCodexSetup(command, app: app)
-                if result.exitCode == 0 {
-                    showAlert(label("Codex 配置已应用", "Codex setup applied"), restartMessage)
-                } else {
+                codexDockStatus = await readCodexStatus(app: app)
+                updateCodexMenuState()
+                guard result.exitCode == 0 else {
                     showAlert(label("无法更新 Codex 配置", "Could not update Codex setup"),
                               String(decoding: result.output, as: UTF8.self))
+                    return
                 }
+
+                let restart = NSAlert()
+                restart.messageText = "\(integrationTitle(.codex)) · \(integrationStatusLabel(enabled ? .enabled : .disabled))"
+                restart.informativeText = label("重新打开 ChatGPT 后生效。可以稍后从 Dock 重开，或现在重启。退出可能中断正在运行的任务。",
+                                                "The setting takes effect when ChatGPT reopens. Reopen it later from the Dock, or restart now. Quitting may interrupt running tasks.")
+                restart.addButton(withTitle: label("稍后重开", "Reopen Later"))
+                restart.addButton(withTitle: label("现在重启", "Restart Now"))
+                NSApp.activate(ignoringOtherApps: true)
+                if restart.runModal() == .alertSecondButtonReturn { try await restartCodex(app: app) }
             } catch {
-                showAlert(label("无法启动 Codex 配置", "Could not start Codex setup"), error.localizedDescription)
+                showAlert(label("无法完成 Codex 设置", "Could not complete Codex setup"), error.localizedDescription)
             }
         }
+    }
+
+    private func restartCodex(app: URL) async throws {
+        let bundle = app.resolvingSymlinksInPath().standardizedFileURL
+        let running = NSWorkspace.shared.runningApplications.filter {
+            $0.bundleURL?.resolvingSymlinksInPath().standardizedFileURL.path == bundle.path
+        }
+        for application in running { _ = application.terminate() }
+        for _ in 0..<60 {
+            if running.allSatisfy({ $0.isTerminated || (kill($0.processIdentifier, 0) == -1 && errno == ESRCH) }) {
+                _ = try await NSWorkspace.shared.openApplication(at: app, configuration: NSWorkspace.OpenConfiguration())
+                return
+            }
+            try await Task.sleep(nanoseconds: 250_000_000)
+        }
+        showAlert(label("ChatGPT 仍在运行", "ChatGPT is still running"),
+                  label("请处理 ChatGPT 的退出提示，或稍后从原来的 Dock 图标重开。设置已保存。",
+                        "Handle any quit prompt in ChatGPT, or reopen it later from its usual Dock icon. The setting is already saved."))
     }
 
     @objc private func showCard(_ sender: NSMenuItem) {

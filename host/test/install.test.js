@@ -221,7 +221,9 @@ test('installing the runtime without hooks preserves the existing hook files', a
   const configPath = path.join(codex, 'hooks.json');
   const existing = '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"echo existing"}]}]}}';
   fs.writeFileSync(configPath, existing);
-  await run('bash', ['install.sh', '--no-menu-bar', '--skip-hooks', '--no-pair'], { cwd: root, env });
+  const { stdout } = await run('bash', ['install.sh', '--no-menu-bar', '--skip-hooks', '--no-pair', '--agent', 'codex', '--lang', 'en'],
+    { cwd: root, env });
+  assert.doesNotMatch(stdout, /Reopen Codex/);
   assert.equal(fs.readFileSync(configPath, 'utf8'), existing);
   assert(fs.existsSync(path.join(state, 'app', 'host', 'agentreminder.js')));
   assert(!fs.existsSync(path.join(state, 'dsh-hooks.json')));
@@ -281,16 +283,24 @@ if (endpoint === 'commits/' + revision) {
   assert(endpoint.startsWith('contents/'));
   assert(process.argv.includes('Accept: application/vnd.github.raw+json'));
   assert.equal(url.searchParams.get('ref'), revision);
-  process.stdout.write(fs.readFileSync(require('node:path').join(process.env.INSTALL_FIXTURE_ROOT, endpoint.slice(9))));
+  const source = fs.readFileSync(require('node:path').join(process.env.INSTALL_FIXTURE_ROOT, endpoint.slice(9)));
+  process.stdout.write(process.env.INSTALL_TEST_OLD_APP && endpoint === 'contents/host/menu-bar/Main.swift'
+    ? source.toString('utf8').replaceAll('--init-tailnet', '--old-menu') : source);
 }
 `, { mode: 0o700 });
 
   fs.mkdirSync(codex);
   fs.mkdirSync(path.join(home, '.workbuddy'));
-  await run('bash', [downloaded, '--ref', revision], { cwd: home, env });
+  await assert.rejects(run('bash', [downloaded, '--lang', 'en', '--ref', revision, '--init-tailnet'], {
+    cwd: home, env: { ...env, INSTALL_TEST_OLD_APP: '1' },
+  }), error => error.code === 2 && /does not support --init-tailnet/.test(error.stderr));
+  assert(!fs.existsSync(opened));
+  assert(!fs.existsSync(path.join(state, 'app', 'host', 'agentreminder.js')));
+  fs.rmSync(requests);
+  await run('bash', [downloaded, '--ref', revision, '--init-tailnet'], { cwd: home, env });
   const bundle = path.join(state, 'app', 'AgentReminder.app');
   assert.deepEqual(fs.readFileSync(opened, 'utf8').trimEnd().split('\n'),
-    ['-n', fs.realpathSync(bundle), '--args', '--replace-existing', '--setup-usb']);
+    ['-n', fs.realpathSync(bundle), '--args', '--replace-existing', '--setup-usb', '--init-tailnet']);
   const fetched = fs.readFileSync(requests, 'utf8').trimEnd().split('\n');
   assert.equal(fetched[0], 'commits/' + revision);
   assert(fetched.includes('contents/host/menu-bar/Main.swift'));
@@ -302,9 +312,10 @@ if (endpoint === 'commits/' + revision) {
   const installation = JSON.parse(fs.readFileSync(path.join(bundle, 'Contents/Resources/Installation.json'), 'utf8'));
   assert(path.isAbsolute(installation.node));
   assert(path.isAbsolute(installation.python));
+  assert.equal(installation.revision, revision);
 });
 
-test('WorkBuddy can be configured and paused independently from the menu', { timeout: 15000 }, async t => {
+test('Claude, dsh, and WorkBuddy can be configured and paused independently from the menu', { timeout: 15000 }, async t => {
   const { home, state, env } = fixture(t);
   const portServer = http.createServer();
   const port = await listen(portServer);
@@ -313,6 +324,11 @@ test('WorkBuddy can be configured and paused independently from the menu', { tim
   fs.writeFileSync(configFile, JSON.stringify({
     httpPort: port, usb: { enabled: false }, bluetooth: { enabled: false }, unrelated: 'keep',
   }));
+  const claudeDir = path.join(home, '.claude');
+  fs.mkdirSync(claudeDir);
+  const claudeFile = path.join(claudeDir, 'settings.json');
+  const unrelated = { type: 'command', command: 'echo keep-existing-hook' };
+  fs.writeFileSync(claudeFile, JSON.stringify({ hooks: { Stop: [{ hooks: [unrelated] }] } }));
   const host = path.join(root, 'host/agentreminder.js');
   const daemon = spawn(process.execPath, [host, 'daemon'], { env, stdio: 'ignore' });
   t.after(() => daemon.kill());
@@ -324,7 +340,7 @@ test('WorkBuddy can be configured and paused independently from the menu', { tim
     if (inbox?.canManageIntegrations) break;
     await new Promise(resolve => setTimeout(resolve, 50));
   }
-  assert.deepEqual(inbox.agentIntegrations, { workbuddy: 'unconfigured' });
+  assert.deepEqual(inbox.agentIntegrations, { claude: 'unconfigured', dsh: 'unconfigured', workbuddy: 'unconfigured' });
   const token = fs.readFileSync(path.join(state, 'menu-setup.token'), 'utf8').trim();
   const post = (route, body, authenticated = false) => fetch(address + route, {
     method: 'POST', headers: {
@@ -332,15 +348,41 @@ test('WorkBuddy can be configured and paused independently from the menu', { tim
     }, body: JSON.stringify(body),
   });
   const toggle = (agent, enabled) => post('/agent-integrations', { agent, enabled }, true);
-  assert.equal((await post('/agent-integrations', { agent: 'workbuddy', enabled: true })).status, 403);
+  assert.equal((await post('/agent-integrations', { agent: 'claude', enabled: true })).status, 403);
   assert.equal((await toggle('unknown', true)).status, 400);
+  assert.deepEqual(await (await toggle('claude', true)).json(), { status: 'enabled', installedHooks: true });
+  assert.deepEqual(await (await toggle('dsh', true)).json(), { status: 'enabled', installedHooks: true });
+  assert.deepEqual(await (await toggle('workbuddy', false)).json(), { status: 'disabled' });
   assert.deepEqual(await (await toggle('workbuddy', true)).json(), { status: 'enabled', installedHooks: true });
+  const hooks = JSON.parse(fs.readFileSync(claudeFile, 'utf8')).hooks;
+  assert(hooks.Stop.some(group => group.hooks.some(hook => hook.command === unrelated.command)));
+  const claudeBytes = fs.readFileSync(claudeFile, 'utf8');
+  const dshFile = path.join(state, 'dsh-hooks.json');
+  const dshBytes = fs.readFileSync(dshFile, 'utf8');
+
+  assert.deepEqual(await (await toggle('claude', false)).json(), { status: 'disabled' });
+  assert.deepEqual((await get('/inbox')).agentIntegrations, { claude: 'disabled', dsh: 'enabled', workbuddy: 'enabled' });
   async function stop(agent) {
     const processHandle = spawn(process.execPath, [host, 'hook', '--agent', agent, '--event', 'stop'], { env });
     const exit = new Promise(resolve => processHandle.once('exit', resolve));
     processHandle.stdin.end(JSON.stringify({ session_id: agent, last_assistant_message: agent }));
     assert.equal(await exit, 0);
   }
+  await stop('claude');
+  await stop('dsh');
+  assert.deepEqual((await get('/inbox')).notifications.map(note => note.detail), ['dsh']);
+  assert.deepEqual(await (await post('/approval', { info: { agent: 'claude' } })).json(),
+    { decision: null, reason: 'agent-disabled' });
+
+  assert.deepEqual(await (await toggle('dsh', false)).json(), { status: 'disabled' });
+  assert.deepEqual(await (await toggle('claude', true)).json(), { status: 'enabled' });
+  await stop('claude');
+  assert.deepEqual((await get('/inbox')).notifications.map(note => note.detail), ['claude', 'dsh']);
+  assert.equal(fs.readFileSync(claudeFile, 'utf8'), claudeBytes);
+  assert.equal(fs.readFileSync(dshFile, 'utf8'), dshBytes);
+  assert.equal(JSON.parse(fs.readFileSync(configFile, 'utf8')).unrelated, 'keep');
+  assert.equal((await get('/status')).pid, daemon.pid);
+
   const audit = path.join(home, '.workbuddy', 'audit-log', 'spool');
   fs.mkdirSync(audit, { recursive: true });
   const auditFile = path.join(audit, 'audit-spool-1-' + new Date().toISOString().slice(0, 10) + '.jsonl');
@@ -364,12 +406,7 @@ test('WorkBuddy can be configured and paused independently from the menu', { tim
   ask('while-disabled');
   await new Promise(resolve => setTimeout(resolve, 1100));
   assert.deepEqual((await get('/inbox')).notifications, notes);
-  assert.deepEqual((await get('/inbox')).agentIntegrations, { workbuddy: 'disabled' });
-  await stop('claude');
-  assert((await get('/inbox')).notifications.some(note => note.detail === 'claude'));
-  assert.deepEqual(await (await toggle('workbuddy', true)).json(), { status: 'enabled' });
-  assert.equal(JSON.parse(fs.readFileSync(configFile, 'utf8')).unrelated, 'keep');
-  assert.equal((await get('/status')).pid, daemon.pid);
+  assert.deepEqual((await get('/inbox')).agentIntegrations, { claude: 'enabled', dsh: 'disabled', workbuddy: 'disabled' });
 });
 
 test('menu firmware flash works without a device handshake and keeps the daemon inbox', { timeout: 15000 }, async t => {

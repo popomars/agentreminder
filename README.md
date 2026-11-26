@@ -37,12 +37,12 @@ curl -fsS -H 'Accept: application/vnd.github.raw+json' \
 
 ### 3. 接入你的 agent
 
-安装器会为检测到的 Codex、Claude Code、dsh 和 WorkBuddy 写入对应 hooks，保留其他 hooks。如果先装了 AgentReminder，再安装 WorkBuddy，可在铃铛里选择 **Agent 接入 → WorkBuddy → 启用**，或运行 `bash install.sh --agent workbuddy`。
+安装器会为检测到的 Codex、Claude Code、dsh 和 WorkBuddy 写入对应 hooks，保留其他 hooks。新装 agent 后可从铃铛的 **Agent 接入** 启用支持的接入，或重跑安装脚本，例如 `bash install.sh --agent workbuddy`。
 
 | Agent | 安装后要做什么 |
 | --- | --- |
 | Codex CLI | 重开 Codex，用 `/hooks` 审核并信任 AgentReminder 的 hooks。 |
-| Codex 桌面端 | 从铃铛选择 **Codex 桌面双端审批 → 启用…**，完全退出 ChatGPT，再从原来的 Dock 图标打开。需要审批时用手动审批，审核人设为用户。 |
+| Codex 桌面端 | 从铃铛选择 **Agent 接入 → Codex 双端审批 → 启用**，再选择「现在重启」或「稍后重开」。需要审批时用手动审批，审核人设为用户。 |
 | Claude Code | 开启新会话。支持 `AskUserQuestion`，2.1.76 及更新版本还支持 `Elicitation`。 |
 | dsh | 在 profile 中安装 Claude Code hooks 桥接，合并 Cordis 示例，并将 `configPath` 指向 `~/.agentreminder/dsh-hooks.json` 的绝对路径。 [Cordis 配置示例](integrations/dsh/cordis.patch.yml) |
 | WorkBuddy（macOS） | 重开 WorkBuddy。任务完成自动通知；命令触发 WorkBuddy 本地安全审批时，设备会提醒回 WorkBuddy 确认。审批提醒显示在「通知」。 |
@@ -58,9 +58,10 @@ curl -fsS -H 'Accept: application/vnd.github.raw+json' \
 | **配对新设备…** | 通过 USB 添加或重新配对设备。 |
 | **安装或更新固件…** | 选择板型，从安装包写入固件。写入时保持 USB 连接。已经配对的设备重启后会重连。 |
 | **发送测试通知** | 快速验证菜单栏和本机设备是否能收卡。 |
-| **Agent 接入** | 从菜单独立启用或停用 WorkBuddy。停用会暂停该 Agent 的新任务通知和审批提醒。 |
+| **联机服务** | **初始化**生成并复制新组密钥，**加入联机服务**使用现有组密钥，**查看联机密钥**可查看或复制本机已保存的密钥。 |
+| **Agent 接入** | 查看 Codex 双端审批、Claude Code、dsh 和 WorkBuddy 的状态并分别启停。Codex 设置在重开 ChatGPT 后生效。 |
 | **登录时启动** | 在 macOS「登录项与扩展」中显示为 AgentReminder。它启动铃铛和后台服务，并恢复已启用的 Codex Dock 配置。 |
-| **Codex 桌面双端审批** | 检测到支持的 ChatGPT 桌面安装时显示。可启用或停用转接，用原来的 Dock 图标重开即可生效。如果登录时 ChatGPT 比铃铛先打开，请重开 ChatGPT。 |
+| **检查更新…** | 检查 GitHub `main` 的版本和提交，打开新版安装说明。 |
 
 设备一次显示一张审批，默认等待 5 分钟。两个预设选项可以在设备上选择。多选项、文字输入和登录验证可回原对话完成。微雪短按 PWR、Passport 竖放时短按下键，可把问题交回电脑。
 
@@ -86,9 +87,21 @@ Linux 运行同一安装脚本，通过 USB 使用。macOS 无图形会话或纯
 
 ## 多台电脑与多个设备
 
-在每台电脑上运行相同的 `bash install.sh`。各自绑定的 USB 或蓝牙设备继续使用现有固件。纯发起端可以用 `--no-menu-bar --no-pair` 安装，并单独启动服务。
+先让各台 Mac 登录同一个 Tailnet。
 
-在每台电脑的 `~/.agentreminder/config.json` 中合并以下字段，保留原有配对配置。所有参加的电脑使用同一把密钥。服务会通过 `tailscale status --json` 自动读取本机地址和在线对端，每 10 秒刷新。新增电脑后不需要修改其他电脑的配置。成员之间需能访问 TCP `47323`。 [Tailscale CLI](https://tailscale.com/docs/reference/tailscale-cli)
+1. 在第一台 Mac 选择 **联机服务 → 初始化**。AgentReminder 生成并保存共享密钥，复制到剪贴板。
+2. 在其他 Mac 选择 **联机服务 → 加入联机服务**，粘贴同一把密钥。
+3. 任意已配置的 Mac 都可以选择 **联机服务 → 查看联机密钥**，查看或重新复制。配置完成后，「初始化」和「加入联机服务」会停用，以保留当前组。
+
+运行 `bash install.sh --init-tailnet` 可在安装时直接打开初始化。使用 GitHub 下载方式时，在执行脚本的那一行加上 `--init-tailnet`。这个选项需要 0.5.8 或更新的 macOS 菜单栏版本。如果本机已经配置，则打开密钥查看。
+
+联机服务启用后，Tailscale 自动发现电脑地址。各机器通过共享密钥认证后才转发卡片，组内需要允许访问 TCP `47323`。启用联机服务时会保留现有通知、审批和设备配对。 [Tailscale CLI](https://tailscale.com/docs/reference/tailscale-cli)
+
+### 无菜单栏的主机
+
+纯发起端可以用 `--no-menu-bar --no-pair` 安装，并单独启动服务。
+
+在每台电脑的 `~/.agentreminder/config.json` 中合并以下字段，保留原有配对配置。所有参加的电脑使用同一把密钥。服务会通过 `tailscale status --json` 自动读取本机地址和在线对端，每 10 秒刷新。新增电脑后不需要修改其他电脑的配置。
 
 ```json
 {
@@ -101,7 +114,7 @@ Linux 运行同一安装脚本，通过 USB 使用。macOS 无图形会话或纯
 
 在一台可信电脑上运行 `node -p "require('node:crypto').randomBytes(32).toString('hex')"` 生成一次密钥。通过私密渠道给参加的电脑配置相同的值，并将配置文件权限设为 `600`。服务先验证对端也持有密钥，再发送卡片。已有手动配置可删除 `listen` 和 `peers`，重启服务后切换为自动发现。
 
-配置后，每台电脑运行下面的命令。macOS 重启后可从「应用程序」重新打开 AgentReminder。看到 `tailnet.listening: true` 后，可从任意成员运行 `node ~/.agentreminder/app/host/agentreminder.js test` 发测试卡。
+手动配置后，运行下面的命令。看到 `tailnet.listening: true` 后，可从任意成员运行 `node ~/.agentreminder/app/host/agentreminder.js test` 发测试卡。
 
 ```bash
 node ~/.agentreminder/app/host/agentreminder.js stop
