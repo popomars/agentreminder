@@ -116,6 +116,18 @@ private enum AgentIntegration: String, CaseIterable {
 private enum IntegrationStatus: String { case enabled, disabled, unconfigured, unavailable }
 private enum TailnetSetupMode: String { case create, join }
 
+private final class TailnetKeyField: NSSecureTextField {
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
+        if modifiers == .command, event.charactersIgnoringModifiers == "v", let editor = currentEditor() {
+            // The menu bar app has no Edit menu to dispatch the paste shortcut.
+            editor.paste(self)
+            return true
+        }
+        return super.performKeyEquivalent(with: event)
+    }
+}
+
 private enum FirmwareBoard: String, CaseIterable {
     case waveshare = "waveshare-amoled-2.16"
     case passport = "folotoy-passport"
@@ -605,7 +617,7 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         alert.messageText = label("加入联机服务", "Join Tailnet service")
         alert.informativeText = label("粘贴已加入联机服务的 Mac 上的共享密钥。",
                                       "Paste the shared key from a Mac that has already joined.")
-        let input = NSSecureTextField(frame: NSRect(x: 0, y: 0, width: 336, height: 26))
+        let input = TailnetKeyField(frame: NSRect(x: 0, y: 0, width: 336, height: 26))
         alert.accessoryView = input
         alert.addButton(withTitle: label("取消", "Cancel"))
         alert.addButton(withTitle: label("加入", "Join"))
