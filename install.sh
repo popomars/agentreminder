@@ -7,14 +7,15 @@ ref=main
 use_checkout=true
 pair=true
 flash=false
+board=
 flash_port=
 flash_baud=
 lang=zh
 agents=()
 say() { if [[ "$lang" == en ]]; then printf '%s\n' "$2"; else printf '%s\n' "$1"; fi; }
 usage() {
-  say '用法：bash install.sh [--agent codex|claude|dsh] [--ref REF] [--flash [--port DEVICE] [--baud RATE]] [--no-pair] [--lang zh|en]' \
-      'Usage: bash install.sh [--agent codex|claude|dsh] [--ref REF] [--flash [--port DEVICE] [--baud RATE]] [--no-pair] [--lang zh|en]'
+  say '用法：bash install.sh [--agent codex|claude|dsh] [--ref REF] [--flash [--board waveshare-amoled-2.16|folotoy-passport] [--port DEVICE] [--baud RATE]] [--no-pair] [--lang zh|en]' \
+      'Usage: bash install.sh [--agent codex|claude|dsh] [--ref REF] [--flash [--board waveshare-amoled-2.16|folotoy-passport] [--port DEVICE] [--baud RATE]] [--no-pair] [--lang zh|en]'
 }
 while (( $# )); do
   case "$1" in
@@ -26,6 +27,9 @@ while (( $# )); do
       ref=$2; use_checkout=false
       shift 2;;
     --flash) flash=true; shift;;
+    --board)
+      case "${2:-}" in waveshare-amoled-2.16|folotoy-passport) board=$2;; *) usage >&2; exit 2;; esac
+      shift 2;;
     --port) [[ -n ${2:-} ]] || { usage >&2; exit 2; }; flash_port=$2; shift 2;;
     --baud) [[ ${2:-} =~ ^[0-9]+$ ]] || { usage >&2; exit 2; }; flash_baud=$2; shift 2;;
     --lang) case "${2:-}" in zh|en) lang=$2;; *) usage >&2; exit 2;; esac; shift 2;;
@@ -42,7 +46,7 @@ command -v node >/dev/null && node -e 'process.exit(+process.versions.node.split
 }
 if "$flash"; then
   command -v python3 >/dev/null || { say '刷机需要 Python 3。' 'Flashing requires Python 3.' >&2; exit 1; }
-elif [[ -n "$flash_port$flash_baud" ]]; then
+elif [[ -n "$board$flash_port$flash_baud" ]]; then
   usage >&2
   exit 2
 fi
@@ -66,8 +70,18 @@ source_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 files=(uninstall.sh host/uninstall.js host/agentreminder.js host/bluetooth.js host/codex-approval-proxy.js host/codex-approval-cli host/open-codex.sh host/configure-codex-dock.js
   host/tools/hardware-check.js integrations/dsh/cordis.patch.yml)
 if "$flash"; then
-  firmware_dir=firmware/release/waveshare-amoled-2.16
-  files+=(flash.sh "$firmware_dir/bootloader.bin" "$firmware_dir/partitions.bin" "$firmware_dir/boot_app0.bin" "$firmware_dir/firmware.bin" "$firmware_dir/SHA256SUMS")
+  if [[ "$board" == folotoy-passport ]]; then
+    firmware_dir=firmware/release/folotoy-ai-passport
+    firmware_files=(AgentReminder-AI-Passport-app.bin AgentReminder-AI-Passport-full.bin)
+    board_args=(--board "$board")
+  else
+    firmware_dir=firmware/release/waveshare-amoled-2.16
+    firmware_files=(bootloader.bin partitions.bin boot_app0.bin firmware.bin)
+    # The default also works with flash.sh from older refs.
+    board_args=()
+  fi
+  files+=(flash.sh "$firmware_dir/SHA256SUMS")
+  for file in "${firmware_files[@]}"; do files+=("$firmware_dir/$file"); done
   mkdir -p "$install_dir/$firmware_dir"
 fi
 if [[ "$(uname -s)" == Darwin ]]; then
@@ -112,7 +126,9 @@ node --check "$stage/host/bluetooth.js"
 node --check "$stage/host/codex-approval-proxy.js"
 node --check "$stage/host/configure-codex-dock.js"
 node --check "$stage/host/tools/hardware-check.js"
-if "$flash"; then AGENTREMINDER_LANG="$lang" bash "$stage/flash.sh" --check; fi
+if "$flash"; then
+  AGENTREMINDER_LANG="$lang" bash "$stage/flash.sh" --check ${board_args[@]+"${board_args[@]}"}
+fi
 for file in "${files[@]}"; do
   mv "$stage/$file" "$install_dir/$file"
 done
@@ -121,7 +137,7 @@ if [[ "$(uname -s)" == Darwin ]]; then chmod 700 "$install_dir/host/bluetooth/ag
 
 host="$install_dir/host/agentreminder.js"
 if "$flash"; then
-  set --
+  set -- ${board_args[@]+"${board_args[@]}"}
   if [[ -n "$flash_port" ]]; then set -- "$@" --port "$flash_port"; fi
   if [[ -n "$flash_baud" ]]; then set -- "$@" --baud "$flash_baud"; fi
   AGENTREMINDER_LANG="$lang" bash "$install_dir/flash.sh" "$@"
@@ -142,7 +158,7 @@ run_host() {
 for agent in "${agents[@]}"; do run_host install "$agent"; done
 if "$pair"; then
   run_host setup-usb
-  if [[ "$lang" == en ]]; then echo 'Connect the board by USB. When prompted on the board, confirm with the right button.'; fi
+  if [[ "$lang" == en ]]; then echo 'Connect the board by USB. Follow the prompt on its screen to confirm.'; fi
 fi
 
 say "AgentReminder 已安装到 $install_dir" "AgentReminder is installed in $install_dir"

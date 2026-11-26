@@ -77,23 +77,11 @@ class Session {
   }
 }
 
-function startBluetooth(hub, Link, log) {
-  const cfg = hub.cfg;
-  if (!cfg.bluetooth.enabled || !available()) {
-    return { tick() {}, status: () => cfg.bluetooth.enabled ? 'unavailable' : 'disabled' };
-  }
-  let active, retryAt = 0, state = 'unpaired';
-  const update = (next) => { if (state !== next) { state = next; log('bluetooth', state); } };
+function bluetoothDevice(id, key, hub, Link, log) {
+  let active, retryAt = 0, state = 'scanning';
+  const update = next => { if (state !== next) { state = next; log('bluetooth', id, state); } };
   const tick = () => {
-    const id = cfg.usb.pairedDeviceId, key = cfg.bluetooth.key;
-    if (!/^[0-9a-f]{12}$/i.test(id || '') || !/^[0-9a-f]{64}$/.test(key || '')) {
-      active?.stop(); update('unpaired'); return;
-    }
-    if (active) {
-      if (active.id !== id || active.key !== key) active.stop();
-      return;
-    }
-    if (Date.now() < retryAt) return;
+    if (active || Date.now() < retryAt) return;
 
     const child = spawn(helper, [id], { stdio: ['pipe', 'pipe', 'pipe'] });
     let link, started = false, authTimer, stopped = false;
@@ -104,7 +92,7 @@ function startBluetooth(hub, Link, log) {
       link?.close();
       child.kill();
     };
-    active = { id, key, stop };
+    active = { stop };
     const session = new Session(key, bytes => child.stdin.write(bytes), () => {
       link = new Link('ble', id, line => session.send(line), stop, hub);
       link.pairedDeviceId = id;
@@ -138,9 +126,39 @@ function startBluetooth(hub, Link, log) {
       retryAt = Date.now() + (['bluetooth-permission', 'bluetooth-unavailable', 'helper-failed'].includes(state) ? 15000 : 1000);
     });
   };
+  return { key, tick, stop: () => active?.stop(), status: () => state };
+}
+
+function startBluetooth(hub, Link, log) {
+  const enabled = hub.cfg.bluetooth.enabled;
+  if (!enabled || !available()) {
+    return { tick() {}, status: () => enabled ? 'unavailable' : 'disabled', states: () => [] };
+  }
+  const devices = new Map();
+  const tick = () => {
+    const pairings = hub.pairings();
+    for (const [id, device] of devices) {
+      if (pairings.get(id)?.key === device.key) continue;
+      device.stop();
+      devices.delete(id);
+    }
+    for (const { id, key } of pairings.values()) {
+      if (!key || !/^[0-9a-f]{12}$/i.test(id)) continue;
+      if (!devices.has(id)) devices.set(id, bluetoothDevice(id, key, hub, Link, log));
+      devices.get(id).tick();
+    }
+  };
+  const states = () => [...devices].map(([id, device]) => ({ id, state: device.status() }));
   tick();
   setInterval(tick, 1000).unref();
-  return { tick, status: () => state };
+  return {
+    tick,
+    states,
+    status: () => {
+      const current = states();
+      return current.some(device => device.state === 'connected') ? 'connected' : current[0]?.state || 'unpaired';
+    },
+  };
 }
 
 module.exports = { available, startBluetooth, Session, cipherStream, frame };
