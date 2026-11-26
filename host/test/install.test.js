@@ -223,10 +223,41 @@ test('installing the runtime without hooks preserves the existing hook files', a
   fs.writeFileSync(configPath, existing);
   const { stdout } = await run('bash', ['install.sh', '--no-menu-bar', '--skip-hooks', '--no-pair', '--agent', 'codex', '--lang', 'en'],
     { cwd: root, env });
-  assert.doesNotMatch(stdout, /Reopen Codex/);
+  assert.doesNotMatch(stdout, /AgentReminder PermissionRequest and Stop|codex --version/);
   assert.equal(fs.readFileSync(configPath, 'utf8'), existing);
   assert(fs.existsSync(path.join(state, 'app', 'host', 'agentreminder.js')));
   assert(!fs.existsSync(path.join(state, 'dsh-hooks.json')));
+});
+
+test('installer detects user-local CLI binaries and remembers their custom settings directories', async t => {
+  const { home, state, codex, env } = fixture(t);
+  const bin = path.join(home, '.local/bin');
+  const tools = path.join(home, 'tools');
+  const claude = path.join(home, 'claude custom');
+  fs.mkdirSync(bin, { recursive: true });
+  fs.mkdirSync(tools);
+  env.PATH = tools + ':/usr/bin:/bin';
+  env.CLAUDE_CONFIG_DIR = claude;
+  fs.symlinkSync(process.execPath, path.join(tools, 'node'));
+  fs.writeFileSync(path.join(bin, 'codex'), '#!/bin/sh\nexit 1\n', { mode: 0o700 });
+  fs.writeFileSync(path.join(bin, 'claude'), '#!/bin/sh\nprintf "2.1.76 (Claude Code)\\n"\n', { mode: 0o700 });
+  const { stdout, stderr } = await run('bash', ['install.sh', '--no-menu-bar', '--no-pair', '--lang', 'en'],
+    { cwd: root, env });
+  assert.match(stderr, /terminal command could not start/);
+  assert.match(stdout, /review and trust the AgentReminder PermissionRequest and Stop hooks/);
+  assert.match(stdout, /Open a new Claude Code session/);
+  assert(JSON.parse(fs.readFileSync(path.join(codex, 'hooks.json'))).hooks.PermissionRequest);
+  assert(JSON.parse(fs.readFileSync(path.join(claude, 'settings.json'))).hooks.Elicitation);
+  const config = JSON.parse(fs.readFileSync(path.join(state, 'config.json')));
+  assert.deepEqual(config.agentConfigDirs, { codex, claude });
+  const loginEnv = { ...env };
+  delete loginEnv.CODEX_HOME;
+  delete loginEnv.CLAUDE_CONFIG_DIR;
+  const host = path.join(state, 'app/host/agentreminder.js');
+  const { stdout: resolved } = await run(process.execPath, ['-e',
+    'const { codex, claude } = require(process.argv[1]).hookSettings; console.log(JSON.stringify({ codex, claude }));', host],
+    { env: loginEnv });
+  assert.deepEqual(JSON.parse(resolved), { codex: path.join(codex, 'hooks.json'), claude: path.join(claude, 'settings.json') });
 });
 
 
@@ -239,7 +270,7 @@ test('macOS installs and launches the menu bar app by default', { skip: process.
   fs.symlinkSync(path.join(state, 'app', 'AgentReminder.app'), bundle);
   const open = path.join(home, 'open');
   const launched = path.join(home, 'launched');
-  fs.writeFileSync(open, '#!/bin/sh\nprintf "%s\\n" "$@" > "$LAUNCH_LOG"\n', { mode: 0o700 });
+  fs.writeFileSync(open, '#!/bin/sh\nprintf "%s\\n" "$@" > "$LAUNCH_LOG"\nexit "${OPEN_STATUS:-0}"\n', { mode: 0o700 });
   env.PATH = `${home}:${env.PATH}`;
   env.LAUNCH_LOG = launched;
 
@@ -251,6 +282,13 @@ test('macOS installs and launches the menu bar app by default', { skip: process.
   await run('codesign', ['--verify', '--strict', bundle]);
   assert(fs.existsSync(path.join(app, 'flash.sh')));
   assert(fs.existsSync(path.join(app, 'firmware/release/waveshare-amoled-2.16/firmware.bin')));
+  const originalBundle = fs.statSync(bundle).ino;
+  await assert.rejects(run('bash', ['install.sh', '--skip-hooks', '--no-pair', '--no-autostart', '--lang', 'en'], {
+    cwd: root, env: { ...env, OPEN_STATUS: '1' },
+  }), /previous app was restored/);
+  assert.equal(fs.statSync(bundle).ino, originalBundle);
+  await run('codesign', ['--verify', '--strict', bundle]);
+  assert.deepEqual(fs.readFileSync(launched, 'utf8').trimEnd().split('\n'), ['-n', fs.realpathSync(bundle), '--args', '--replace-existing']);
   await run('bash', [path.join(app, 'uninstall.sh')], { env });
   assert(!fs.existsSync(bundle));
 });
@@ -315,7 +353,7 @@ if (endpoint === 'commits/' + revision) {
   assert.equal(installation.revision, revision);
 });
 
-test('Claude, dsh, and WorkBuddy can be configured and paused independently from the menu', { timeout: 15000 }, async t => {
+test('Codex CLI and other hook agents can be configured and paused independently from the menu', { timeout: 15000 }, async t => {
   const { home, state, env } = fixture(t);
   const portServer = http.createServer();
   const port = await listen(portServer);
@@ -340,7 +378,7 @@ test('Claude, dsh, and WorkBuddy can be configured and paused independently from
     if (inbox?.canManageIntegrations) break;
     await new Promise(resolve => setTimeout(resolve, 50));
   }
-  assert.deepEqual(inbox.agentIntegrations, { claude: 'unconfigured', dsh: 'unconfigured', workbuddy: 'unconfigured' });
+  assert.deepEqual(inbox.agentIntegrations, { codex: 'unconfigured', claude: 'unconfigured', dsh: 'unconfigured', workbuddy: 'unconfigured' });
   const token = fs.readFileSync(path.join(state, 'menu-setup.token'), 'utf8').trim();
   const post = (route, body, authenticated = false) => fetch(address + route, {
     method: 'POST', headers: {
@@ -361,9 +399,11 @@ test('Claude, dsh, and WorkBuddy can be configured and paused independently from
   const dshBytes = fs.readFileSync(dshFile, 'utf8');
 
   assert.deepEqual(await (await toggle('claude', false)).json(), { status: 'disabled' });
-  assert.deepEqual((await get('/inbox')).agentIntegrations, { claude: 'disabled', dsh: 'enabled', workbuddy: 'enabled' });
-  async function stop(agent) {
-    const processHandle = spawn(process.execPath, [host, 'hook', '--agent', agent, '--event', 'stop'], { env });
+  assert.deepEqual((await get('/inbox')).agentIntegrations, { codex: 'unconfigured', claude: 'disabled', dsh: 'enabled', workbuddy: 'enabled' });
+  async function stop(agent, extraEnv = {}) {
+    const processHandle = spawn(process.execPath, [host, 'hook', '--agent', agent, '--event', 'stop'], {
+      env: { ...env, AGENTREMINDER_CODEX_DUAL_APPROVAL: '', ...extraEnv },
+    });
     const exit = new Promise(resolve => processHandle.once('exit', resolve));
     processHandle.stdin.end(JSON.stringify({ session_id: agent, last_assistant_message: agent }));
     assert.equal(await exit, 0);
@@ -406,7 +446,16 @@ test('Claude, dsh, and WorkBuddy can be configured and paused independently from
   ask('while-disabled');
   await new Promise(resolve => setTimeout(resolve, 1100));
   assert.deepEqual((await get('/inbox')).notifications, notes);
-  assert.deepEqual((await get('/inbox')).agentIntegrations, { claude: 'enabled', dsh: 'disabled', workbuddy: 'disabled' });
+  assert.deepEqual((await get('/inbox')).agentIntegrations, { codex: 'unconfigured', claude: 'enabled', dsh: 'disabled', workbuddy: 'disabled' });
+
+  assert.deepEqual(await (await toggle('codex', true)).json(), { status: 'enabled', installedHooks: true });
+  assert.deepEqual(await (await toggle('codex', false)).json(), { status: 'disabled' });
+  await stop('codex');
+  assert.deepEqual((await get('/inbox')).notifications, notes);
+  await stop('codex', { AGENTREMINDER_CODEX_DUAL_APPROVAL: '1' });
+  assert((await get('/inbox')).notifications.some(note => note.detail === 'codex'));
+  assert.equal((await (await post('/approval', { info: { agent: 'codex' } })).json()).reason, 'no-device');
+  assert.deepEqual(await (await toggle('codex', true)).json(), { status: 'enabled' });
 });
 
 test('menu firmware flash works without a device handshake and keeps the daemon inbox', { timeout: 15000 }, async t => {

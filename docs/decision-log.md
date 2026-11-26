@@ -140,10 +140,14 @@ the host daemon on loopback. Headless installations can use
 `--no-menu-bar`. Pairing, firmware and the local delivery test are in
 the bell menu. The installer registers the macOS login item by default.
 The menu checks the published application version and revision on GitHub.
+Installing from the menu downloads the installer from that exact revision
+and preserves existing pairings, login preferences and agent hook files.
 Agent integrations shows Codex Dock configuration alongside the Claude Code,
 dsh and WorkBuddy hooks. Hook switches gate local forwarding at runtime and
 preserve existing third-party settings. Codex applies its configuration the
-next time ChatGPT opens.
+next time ChatGPT opens. Codex CLI has its own row. The menu confirms that
+hooks were installed and Codex handles trust review through `/hooks`.
+The local service remembers custom CLI configuration directories selected at install.
 The daemon owns unread counts and retains the latest notification in each
 host, project, and conversation group, up to 100 groups. The app shows the
 latest notification and its reception time. The app uses the existing USB pairing endpoint and the

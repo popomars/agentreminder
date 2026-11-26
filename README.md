@@ -37,17 +37,24 @@ curl -fsS -H 'Accept: application/vnd.github.raw+json' \
 
 ### 3. 接入你的 agent
 
-安装器会为检测到的 Codex、Claude Code、dsh 和 WorkBuddy 写入对应 hooks，保留其他 hooks。新装 agent 后可从铃铛的 **Agent 接入** 启用支持的接入，或重跑安装脚本，例如 `bash install.sh --agent workbuddy`。
+安装器会自动检测 Codex CLI、Claude Code CLI、dsh 和 WorkBuddy，并合并所需 hooks。Codex 默认使用 `~/.codex/hooks.json`，Claude Code 默认使用 `~/.claude/settings.json`。如果安装时设置了 `CODEX_HOME` 或 `CLAUDE_CONFIG_DIR`，菜单栏服务也会沿用该目录。新装 CLI 后可重新运行安装器，或在 **Agent 接入** 中启用对应项目。
 
 | Agent | 安装后要做什么 |
 | --- | --- |
-| Codex CLI | 重开 Codex，用 `/hooks` 审核并信任 AgentReminder 的 hooks。 |
-| Codex 桌面端 | 从铃铛选择 **Agent 接入 → Codex 双端审批 → 启用**，再选择「现在重启」或「稍后重开」。需要审批时用手动审批，审核人设为用户。 |
-| Claude Code | 开启新会话。支持 `AskUserQuestion`，2.1.76 及更新版本还支持 `Elicitation`。 |
+| Codex CLI | 重开终端会话，输入 `/hooks`，审核并信任 AgentReminder 的 `PermissionRequest` 和 `Stop`。菜单里的「Hooks 已配置」表示配置已写入。 |
+| Codex 桌面端 | 从铃铛选择 **Agent 接入 → Codex 双端审批（桌面端）→ 启用**，再选择「现在重启」或「稍后重开」。需要审批时用手动审批，审核人设为用户。 |
+| Claude Code CLI | 开启新的 `claude` 会话。支持 `AskUserQuestion`，2.1.76 及更新版本还支持 `Elicitation`。 |
 | dsh | 在 profile 中安装 Claude Code hooks 桥接，合并 Cordis 示例，并将 `configPath` 指向 `~/.agentreminder/dsh-hooks.json` 的绝对路径。 [Cordis 配置示例](integrations/dsh/cordis.patch.yml) |
 | WorkBuddy（macOS） | 重开 WorkBuddy。任务完成自动通知；命令触发 WorkBuddy 本地安全审批时，设备会提醒回 WorkBuddy 确认。审批提醒显示在「通知」。 |
 
-真实任务完成后，打开铃铛查看通知。遇到审批时，在原 agent 或设备上处理。Codex 双端审批支持原生命令和文件修改，先处理的一端生效。设备断线、超时或选择「回电脑继续」时，在原对话里继续操作。
+### 4. 在 CLI 处理审批
+
+1. 配对设备后，从铃铛发送测试通知。也可以运行 `node ~/.agentreminder/app/host/agentreminder.js test`，向设备发送一张模拟审批卡。
+2. 在项目目录打开新会话。Codex CLI 可用 `codex --sandbox read-only --ask-for-approval on-request` 测试，先在 `/hooks` 完成信任。Claude Code CLI 可用 `claude --permission-mode default`。请 Agent 执行一个需要批准的无害操作，例如创建临时测试文件。当前权限已允许的操作会直接执行。
+3. 收到真实审批卡后，按设备屏幕标示的「同意」或「拒绝」。选「回电脑继续」、设备离线或等待超时后，可回原终端处理提示。CLI 先等审批 hook 返回，再显示原生确认；同一时间可在两端处理的功能由桌面端双端审批提供。
+4. 任务结束后，在铃铛的「通知」查看完成卡。若 Codex 启动失败或没有 `/hooks`，先用 `codex --version` 检查 CLI，再安装支持 hooks 的版本。
+
+[Codex hooks 官方说明](https://learn.chatgpt.com/docs/hooks) · [Claude Code hooks 官方说明](https://code.claude.com/docs/en/hooks)
 
 ## 铃铛菜单怎么用
 
@@ -59,9 +66,9 @@ curl -fsS -H 'Accept: application/vnd.github.raw+json' \
 | **安装或更新固件…** | 选择板型，从安装包写入固件。写入时保持 USB 连接。已经配对的设备重启后会重连。 |
 | **发送测试通知** | 快速验证菜单栏和本机设备是否能收卡。 |
 | **联机服务** | **初始化**生成并复制新组密钥，**加入联机服务**使用现有组密钥，**查看联机密钥**可查看或复制本机已保存的密钥。 |
-| **Agent 接入** | 查看 Codex 双端审批、Claude Code、dsh 和 WorkBuddy 的状态并分别启停。Codex 设置在重开 ChatGPT 后生效。 |
+| **Agent 接入** | 查看 Codex CLI、Codex 桌面双端审批、Claude Code CLI、dsh 和 WorkBuddy 的状态并分别启停。Codex 桌面设置在重开 ChatGPT 后生效。 |
 | **登录时启动** | 在 macOS「登录项与扩展」中显示为 AgentReminder。它启动铃铛和后台服务，并恢复已启用的 Codex Dock 配置。 |
-| **检查更新…** | 检查 GitHub `main` 的版本和提交，打开新版安装说明。 |
+| **检查更新…** | 检查 GitHub `main` 的版本。发现新版后可选择「安装更新」，完成后铃铛自动重开，保留配对、联机设置和 hooks。 |
 
 设备一次显示一张审批，默认等待 5 分钟。两个预设选项可以在设备上选择。多选项、文字输入和登录验证可回原对话完成。微雪短按 PWR、Passport 竖放时短按下键，可把问题交回电脑。
 
