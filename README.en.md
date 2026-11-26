@@ -82,7 +82,7 @@ For remote agents over SSH, use `--no-pair` on the remote machine and forward th
 
 Run `bash install.sh --menu-bar` from this checkout. Building the menu bar app requires macOS 13 or later and Xcode Command Line Tools. After setup, open **AgentReminder** in Finder under `~/Applications`. The app connects to the local service or starts it for you. Allow Bluetooth access when macOS prompts. On an existing installation, run `bash install.sh --menu-bar --skip-hooks --no-pair` to retain the current hooks and pairing settings.
 
-The bell shows the unread notification and pending approval counts. Open its menu to view either list. Opening a notification marks it as read, and there is also a **Mark all as read** action. The service keeps up to 100 notifications for its current run. To add a device, connect a board with AgentReminder firmware over USB, choose **Pair a new device**, then confirm on the board.
+The bell shows the unread notification and pending approval counts. Open its menu to view either list. Opening a notification marks it as read, and there is also a **Mark all as read** action. The service keeps up to 100 notifications for its current run. Completion entries show the host, project, conversation, and “Task completed”. Use the Notifications submenu to clear the local notification list, or the main menu to clear notifications and approvals together. Clearing approvals retracts their device cards and hands decisions back to the originating client. To add a device, connect a board with AgentReminder firmware over USB, choose **Pair a new device**, then confirm on the board.
 
 ## FoloToy AI Passport
 

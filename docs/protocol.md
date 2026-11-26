@@ -45,6 +45,7 @@ Each frame starts with a two-byte big-endian payload length. The host and device
 - `POST /notify {info}` → `{delivered: n}`
 - `GET /inbox` → local menu bar view with unread count, recent notifications, active non-pairing approvals and the number of connected devices. Notifications are held in memory, up to 100 per daemon run. The inbox requires a loopback Host header.
 - `POST /inbox/read {ids: [...]}` → marks the listed notifications read. Reads do not settle approvals or affect boards.
+- `POST /inbox/clear {notifications: [...], approvals: [...]}` → removes the listed local notifications and hands the listed pending approvals back to their originating clients. The app sends the IDs it displayed, so cards arriving after that snapshot stay in the inbox.
 - `POST /pair {}` → asks one connected USB device for confirmation, preferring an unpaired device when there is exactly one. On macOS, compatible firmware stores a Bluetooth enrollment key after confirmation. The daemon retains earlier board enrollments. Ordinary cards and decisions are restricted to registered USB devices and their authenticated Bluetooth links once at least one device is paired. The daemon broadcasts the first resolution to every ready link.
 - `GET /status`, `POST /raw` (broadcast as-is), `POST /shutdown`
 

@@ -228,7 +228,11 @@ function createMesh(config, hub, log, discover = discoverPeers) {
       const close = () => { if (!res.writableEnded) cancel('hook-gone'); };
       res.on('close', close);
       const timer = setTimeout(() => cancel('timeout'), timeoutMs);
-      outgoing.set(card.id, card);
+      let handoff;
+      const handedOff = new Promise(resolve => {
+        handoff = () => resolve({ decision: null, reason: 'menu-bar' });
+      });
+      outgoing.set(card.id, { card, handoff });
       try {
         const local = hub.requestApproval(info, timeoutMs, null, null, card).promise;
         const remote = peers.map(async peer => {
@@ -238,7 +242,7 @@ function createMesh(config, hub, log, discover = discoverPeers) {
           }
           return { decision: result.action === 'skip' ? null : result.decision, action: result.action, reason: `tailnet:${peer.address}` };
         });
-        const result = await firstDecision([local, ...remote]);
+        const result = await Promise.race([firstDecision([local, ...remote]), handedOff]);
         return { decision: result.decision, reason: result.reason };
       } finally {
         cancel('settled');

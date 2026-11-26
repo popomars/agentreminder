@@ -27,6 +27,12 @@ the approval on a board cleared the pending count. Re-pairing the Waveshare
 through the menu saved its new key and authenticated a Bluetooth reconnect. The
 Passport enrollment was retained.
 
+Menu bar v0.5.2 was installed and tested on the Mac. The completion entry showed
+the host, project, conversation, and completion status. Clearing only
+notifications left the pending approval in place. Clearing both reset the two
+counts, withdrew the card from the physical device, and returned the approval
+to its originating client.
+
 See [Chinese setup](../README.md), [English setup](../README.en.md), [protocol](protocol.md), and [progress](progress.md).
 
 The FoloToy branch adds AI Passport community-play and application-only images.
