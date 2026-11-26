@@ -46,6 +46,10 @@ test('real hook processes → daemon → TCP device → agent-compatible JSON', 
   t.after(() => { daemon.kill(); for (const sock of sockets) sock.destroy(); device.close(); fs.rmSync(home, { recursive: true, force: true }); });
   for (let i = 0; i < 100 && !received.some(m => m.t === 'hello'); i++) await sleep(30);
   assert(received.some(m => m.t === 'hello')); await sleep(30);
+  const inbox = () => fetch(`http://127.0.0.1:${httpPort}/inbox`).then(r => r.json());
+  const markRead = ids => fetch(`http://127.0.0.1:${httpPort}/inbox/read`, {
+    method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ ids }),
+  }).then(r => r.json());
   const relayHost = received.find(m => m.t === 'hello').host;
   assert(relayHost);
   const hook = (agent, event, input) => childResult(spawn(process.execPath, [host, 'hook', '--agent', agent, '--event', event], { env }), input);
@@ -66,6 +70,13 @@ test('real hook processes → daemon → TCP device → agent-compatible JSON', 
     assert.equal(received.filter(m => m.t === 'notify').at(-1).project, '项目');
     assert.equal(received.filter(m => m.t === 'notify').at(-1).host, relayHost);
   }
+
+  const notifications = await inbox();
+  assert.equal(notifications.unread, 3);
+  assert.equal(notifications.notifications[0].detail, '完成');
+  assert.equal(notifications.devices, 1);
+  assert.deepEqual(await markRead([notifications.notifications[0].id]), { ok: true });
+  assert.equal((await inbox()).unread, 2);
 
   const question = { question: '请选择部署环境', options: [{ label: '预览' }, { label: '正式' }] };
   decision = 'deny';
@@ -120,8 +131,10 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   send({ method: 'fixture/trigger', params: { requestId: 100 } });
   await until(() => desktop.some(m => m.id === 100) && received.slice(before).some(m => m.t === 'approval'));
   const card = received.slice(before).find(m => m.t === 'approval');
+  assert.equal((await inbox()).approvals[0].id, card.id);
   send({ id: 100, result: { decision: 'decline' } });
   await until(() => received.some(m => m.t === 'cancel' && m.id === card.id));
+  assert.equal((await inbox()).approvals.length, 0);
 
   decision = 'allow';
   send({ method: 'fixture/trigger', params: { requestId: 101 } });

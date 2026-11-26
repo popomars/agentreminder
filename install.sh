@@ -6,6 +6,8 @@ repo=popomars/agentreminder
 ref=main
 use_checkout=true
 pair=true
+menu_bar=false
+install_hooks=true
 flash=false
 board=
 flash_port=
@@ -14,8 +16,8 @@ lang=zh
 agents=()
 say() { if [[ "$lang" == en ]]; then printf '%s\n' "$2"; else printf '%s\n' "$1"; fi; }
 usage() {
-  say '用法：bash install.sh [--agent codex|claude|dsh] [--ref REF] [--flash [--board waveshare-amoled-2.16|folotoy-passport] [--port DEVICE] [--baud RATE]] [--no-pair] [--lang zh|en]' \
-      'Usage: bash install.sh [--agent codex|claude|dsh] [--ref REF] [--flash [--board waveshare-amoled-2.16|folotoy-passport] [--port DEVICE] [--baud RATE]] [--no-pair] [--lang zh|en]'
+  say '用法：bash install.sh [--agent codex|claude|dsh] [--ref REF] [--flash [--board waveshare-amoled-2.16|folotoy-passport] [--port DEVICE] [--baud RATE]] [--menu-bar] [--skip-hooks] [--no-pair] [--lang zh|en]' \
+      'Usage: bash install.sh [--agent codex|claude|dsh] [--ref REF] [--flash [--board waveshare-amoled-2.16|folotoy-passport] [--port DEVICE] [--baud RATE]] [--menu-bar] [--skip-hooks] [--no-pair] [--lang zh|en]'
 }
 while (( $# )); do
   case "$1" in
@@ -33,6 +35,8 @@ while (( $# )); do
     --port) [[ -n ${2:-} ]] || { usage >&2; exit 2; }; flash_port=$2; shift 2;;
     --baud) [[ ${2:-} =~ ^[0-9]+$ ]] || { usage >&2; exit 2; }; flash_baud=$2; shift 2;;
     --lang) case "${2:-}" in zh|en) lang=$2;; *) usage >&2; exit 2;; esac; shift 2;;
+    --menu-bar) menu_bar=true; shift;;
+    --skip-hooks) install_hooks=false; shift;;
     --no-pair) pair=false; shift;;
     -h|--help) usage; exit 0;;
     *) usage >&2; exit 2;;
@@ -44,6 +48,13 @@ command -v node >/dev/null && node -e 'process.exit(+process.versions.node.split
   say '请先安装 Node.js 18 或更新版本。' 'Install Node.js 18 or newer first.' >&2
   exit 1
 }
+if "$menu_bar"; then
+  if [[ "$(uname -s)" != Darwin ]] || (( $(sw_vers -productVersion | cut -d. -f1) < 13 )) ||
+     ! xcrun --find swiftc >/dev/null 2>&1; then
+    say '菜单栏应用需要 macOS 13 或更新版本及 Xcode 命令行工具。' 'The menu bar app requires macOS 13 or later and Xcode Command Line Tools.' >&2
+    exit 1
+  fi
+fi
 if "$flash"; then
   command -v python3 >/dev/null || { say '刷机需要 Python 3。' 'Flashing requires Python 3.' >&2; exit 1; }
 elif [[ -n "$board$flash_port$flash_baud" ]]; then
@@ -51,12 +62,12 @@ elif [[ -n "$board$flash_port$flash_baud" ]]; then
   exit 2
 fi
 
-if (( ${#agents[@]} == 0 )); then
+if "$install_hooks" && (( ${#agents[@]} == 0 )); then
   if command -v codex >/dev/null || [[ -d ${CODEX_HOME:-"$HOME/.codex"} || -x "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex" ]]; then agents+=(codex); fi
   if command -v claude >/dev/null || [[ -d "$HOME/.claude" ]]; then agents+=(claude); fi
   if command -v dsh >/dev/null; then agents+=(dsh); fi
 fi
-if (( ${#agents[@]} == 0 )); then
+if "$install_hooks" && (( ${#agents[@]} == 0 )); then
   say '未找到 agent。请使用 --agent codex、--agent claude 或 --agent dsh。' \
       'No agent detected. Pass --agent codex, --agent claude, or --agent dsh.' >&2
   exit 1
@@ -130,6 +141,30 @@ if grep -Fq "require('./tailnet')" "$stage/host/agentreminder.js"; then
   node --check "$stage/$tailnet_file"
   files+=("$tailnet_file")
 fi
+if "$menu_bar"; then
+  mkdir -p "$stage/menu-bar"
+  for file in Main.swift Info.plist; do
+    if [[ -n $sha ]]; then
+      github_get "contents/host/menu-bar/$file?ref=$sha" application/vnd.github.raw+json > "$stage/menu-bar/$file"
+    else
+      cp "$source_dir/host/menu-bar/$file" "$stage/menu-bar/$file"
+    fi
+  done
+  menu_app=AgentReminder.app
+  menu_contents="$stage/$menu_app/Contents"
+  mkdir -p "$menu_contents/MacOS" "$menu_contents/Resources"
+  cp "$stage/menu-bar/Info.plist" "$menu_contents/Info.plist"
+  xcrun swiftc -O -parse-as-library -target "$(uname -m)-apple-macos13" -module-cache-path "$stage/swift-cache" \
+    "$stage/menu-bar/Main.swift" -o "$menu_contents/MacOS/AgentReminder"
+  node - "$install_dir" "$lang" > "$menu_contents/Resources/Installation.json" <<'JS'
+const path = require('node:path');
+const [installDir, language] = process.argv.slice(2);
+console.log(JSON.stringify({ node: process.execPath, statePath: path.resolve(installDir, '..'), language }));
+JS
+  codesign --sign - "$stage/$menu_app"
+  files+=("$menu_app/Contents/Info.plist" "$menu_app/Contents/MacOS/AgentReminder"
+    "$menu_app/Contents/Resources/Installation.json" "$menu_app/Contents/_CodeSignature/CodeResources")
+fi
 unset github_token
 node --check "$stage/host/agentreminder.js"
 node --check "$stage/host/uninstall.js"
@@ -141,6 +176,7 @@ if "$flash"; then
   AGENTREMINDER_LANG="$lang" bash "$stage/flash.sh" --check ${board_args[@]+"${board_args[@]}"}
 fi
 for file in "${files[@]}"; do
+  mkdir -p "$install_dir/$(dirname "$file")"
   mv "$stage/$file" "$install_dir/$file"
 done
 chmod 700 "$install_dir/uninstall.sh" "$install_dir/host/codex-approval-cli" "$install_dir/host/open-codex.sh"
@@ -166,17 +202,30 @@ run_host() {
   fi
 }
 
-for agent in "${agents[@]}"; do run_host install "$agent"; done
+if "$install_hooks"; then
+  for agent in "${agents[@]}"; do run_host install "$agent"; done
+fi
 if "$pair"; then
   run_host setup-usb
   if [[ "$lang" == en ]]; then echo 'Connect the board by USB. Follow the prompt on its screen to confirm.'; fi
+fi
+
+if "$menu_bar"; then
+  menu_path="$(cd "$install_dir" && pwd)/$menu_app"
+  if [[ -z ${AGENTREMINDER_HOME:-} ]]; then
+    mkdir -p "$HOME/Applications"
+    shortcut="$HOME/Applications/$menu_app"
+    if [[ ! -e "$shortcut" && ! -L "$shortcut" ]]; then ln -s "$menu_path" "$shortcut"; fi
+    if [[ -L "$shortcut" && "$(readlink "$shortcut")" == "$menu_path" ]]; then menu_path="$shortcut"; fi
+  fi
+  say "在访达双击 $menu_path 即可启动菜单栏服务。" "Open $menu_path in Finder to start AgentReminder."
 fi
 
 say "AgentReminder 已安装到 $install_dir" "AgentReminder is installed in $install_dir"
 say "查看连接状态：node \"$host\" status" "Check connection: node \"$host\" status"
 say "卸载主机服务：bash \"$install_dir/uninstall.sh\"" "Uninstall: bash \"$install_dir/uninstall.sh\" --lang en"
 if ! "$pair"; then say "连接设备后配对：node \"$host\" pair" "Pair after connecting by USB: node \"$host\" pair"; fi
-for agent in "${agents[@]}"; do
+for agent in ${agents[@]+"${agents[@]}"}; do
   if [[ "$agent" == dsh ]]; then
     say "dsh 需安装 Claude Code hooks 桥接，并将示例合并到所用 profile：$install_dir/integrations/dsh/cordis.patch.yml" \
         "For dsh, install the Claude Code hooks bridge and merge this example into your profile: $install_dir/integrations/dsh/cordis.patch.yml"
