@@ -23,8 +23,9 @@ const { StringDecoder } = require('string_decoder');
 const crypto = require('crypto');
 const { spawn, execFileSync } = require('child_process');
 const bluetooth = require('./bluetooth');
+const tailnet = require('./tailnet');
 
-const VERSION = '0.4.4';
+const VERSION = '0.5.0';
 const HOME_DIR = process.env.AGENTREMINDER_HOME || path.join(os.homedir(), '.agentreminder');
 const CONFIG_PATH = path.join(HOME_DIR, 'config.json');
 const LOG_PATH = path.join(HOME_DIR, 'daemon.log');
@@ -179,10 +180,18 @@ class Hub {
     }
   }
 
-  /** Ask connected devices. promise -> { decision: 'allow'|'deny'|null } (null = let the agent ask normally). */
-  requestApproval(info, timeoutMs, target = null, enrollmentKey = null) {
+  approvalCard(info, timeoutMs) {
     const ts = Date.now();
-    const id = crypto.randomUUID();
+    // An already-running desktop bridge may still send file approvals without a project.
+    const project = info.project || (!info.host && info.agent === 'codex' ? clip(path.basename(codexThread(info.sessionId).cwd || ''), 80) : '');
+    return { ...info, host: info.host || hostName, project, t: 'approval', id: crypto.randomUUID(), ts,
+      receivedTime: cardTime(ts), timeout: Math.max(1, Math.ceil(timeoutMs / 1000)) };
+  }
+
+  /** Ask connected devices. promise -> { decision: 'allow'|'deny'|null } (null = let the agent ask normally). */
+  requestApproval(info, timeoutMs, target = null, enrollmentKey = null, card = null) {
+    const payload = card ? { ...card, timeout: Math.max(1, Math.ceil(timeoutMs / 1000)) } : this.approvalCard(info, timeoutMs);
+    const { id } = payload;
     const links = target ? [target] : this.requestLinks(info);
     if (!links.length || (target && (!target.ready || target.closed))) {
       if (info.interaction && this.readyLinks().length) {
@@ -191,11 +200,8 @@ class Hub {
       return { id, promise: Promise.resolve({ decision: null, reason: 'no-device' }) };
     }
     const promise = new Promise(resolve => {
-      // An already-running desktop bridge may still send file approvals without a project.
-      const project = info.project || (!info.host && info.agent === 'codex' ? clip(path.basename(codexThread(info.sessionId).cwd || ''), 80) : '');
-      const payload = { ...info, host: info.host || hostName, project, t: 'approval', id, ts, receivedTime: cardTime(ts), timeout: Math.round(timeoutMs / 1000) };
       const timer = setTimeout(() => this.resolve(id, null, 'timeout'), timeoutMs);
-      this.pending.set(id, { payload, resolve, timer, target, deadline: Date.now() + timeoutMs });
+      this.pending.set(id, { payload, resolve, timer, target, mirrored: Boolean(card), deadline: Date.now() + timeoutMs });
       if (enrollmentKey) target.send({ ...payload, t: 'ble-pair', key: enrollmentKey });
       else for (const link of links) link.send(payload);
       log('approval ->', id, info.agent, info.title);
@@ -211,7 +217,8 @@ class Hub {
     const result = { t: 'resolved', id, decision: d || 'skip', by };
     if (p.target) p.target.send(result); else this.broadcast(result);
     log('approval <-', id, d || 'skip', by);
-    p.resolve({ decision: d, reason: by, ...(p.target && bluetoothPaired ? { bluetoothPaired } : {}) });
+    p.resolve({ decision: d, reason: by, ...(p.mirrored && decision === 'skip' ? { action: 'skip' } : {}),
+      ...(p.target && bluetoothPaired ? { bluetoothPaired } : {}) });
   }
   cancel(id, why) {
     const p = this.pending.get(id);
@@ -222,10 +229,12 @@ class Hub {
     log('approval cancelled', id, why);
     p.resolve({ decision: null, reason: why });
   }
-  notify(info) {
+  notificationCard(info) {
     const ts = Date.now();
-    const payload = { ...info, host: info.host || hostName, t: 'notify', id: crypto.randomUUID(), ts, receivedTime: cardTime(ts),
+    return { ...info, host: info.host || hostName, t: 'notify', id: crypto.randomUUID(), ts, receivedTime: cardTime(ts),
       sequence: ++this.notificationSequence };
+  }
+  notify(info, payload = this.notificationCard(info)) {
     const links = this.readyLinks();
     for (const link of links) {
       if (info.kind === 'input' && info.reason && link.info.interaction !== true) {
@@ -350,6 +359,11 @@ function runDaemon() {
   ensureHome();
   const cfg = loadConfig();
   const hub = new Hub(cfg);
+  let mesh, meshConfigError;
+  if (cfg.tailnet?.enabled) {
+    try { mesh = tailnet.createMesh(tailnet.validateConfig(cfg.tailnet), hub, log); }
+    catch (error) { meshConfigError = error.message; log(meshConfigError); }
+  }
   let ble;
 
   const prompted = new WeakSet();
@@ -363,7 +377,7 @@ function runDaemon() {
     if (cfg.usb.pairedDeviceId === deviceId && (!canPairBluetooth || (!response && cfg.bluetooth.key && target.info.ble_paired))) {
       return { deviceId, bluetoothPaired: !!cfg.bluetooth.key };
     }
-    if (hub.pending.size) return { error: 'approval-pending' };
+    if (hub.pending.size || mesh?.outgoing.size) return { error: 'approval-pending' };
     if (!response && prompted.has(target)) return { error: 'already-prompted' };
     prompted.add(target);
     const key = canPairBluetooth ? crypto.randomBytes(32).toString('hex') : null;
@@ -394,7 +408,11 @@ function runDaemon() {
           waitingForUsbPairing: !!(cfg.usb.autoPair && !cfg.usb.pairedDeviceId),
           bluetooth: ble.status(),
           devices: hub.readyLinks().map(l => ({ kind: l.kind, name: l.name, info: l.info })),
-          pending: [...hub.pending.values()].map(p => ({ id: p.payload.id, agent: p.payload.agent, title: p.payload.title })),
+          pending: [...new Map([
+            ...[...hub.pending].map(([id, pending]) => [id, pending.payload]),
+            ...(mesh?.outgoing || []),
+          ]).values()].map(({ id, agent, title }) => ({ id, agent, title })),
+          ...(mesh ? { tailnet: mesh.status() } : meshConfigError ? { tailnet: { listening: false, error: meshConfigError } } : {}),
         });
       }
       if (req.method !== 'POST') return reply(404, { error: 'not found' });
@@ -418,13 +436,19 @@ function runDaemon() {
         if ([...hub.pending.values()].some(pending => pending.target)) {
           return reply(200, { decision: null, reason: 'pairing-in-progress' });
         }
-        const timeoutMs = Math.max(5, Math.min(body.timeoutSec || cfg.approvalTimeoutSec, 3600)) * 1000;
-        const { id, promise } = hub.requestApproval({ ...body.info, interaction: req.url === '/interaction' }, timeoutMs);
+        const seconds = Number(body.timeoutSec || cfg.approvalTimeoutSec);
+        const timeoutMs = Math.round(Math.max(5, Math.min(Number.isFinite(seconds) ? seconds : 300, 3600)) * 1000);
+        const info = { ...body.info, interaction: req.url === '/interaction' };
+        if (mesh) return reply(200, await mesh.approval(info, timeoutMs, res));
+        const { id, promise } = hub.requestApproval(info, timeoutMs);
         // If the hook process dies (agent cancelled / user hit Esc), clear the card on the device.
         res.on('close', () => { if (!res.writableEnded) hub.cancel(id, 'hook-gone'); });
         return reply(200, await promise);
       }
-      if (req.url === '/notify') return reply(200, { delivered: hub.notify(body.info || {}) });
+      if (req.url === '/notify') {
+        const info = body.info || {};
+        return reply(200, { delivered: mesh ? await mesh.notify(info) : hub.notify(info) });
+      }
       if (req.url === '/raw') {
         if (body.t === 'ble-pair') return reply(409, { error: 'use USB pairing' });
         const links = hub.readyLinks().filter(link => body.t !== 'wifi' || link.kind === 'usb');
@@ -444,6 +468,7 @@ function runDaemon() {
     ble = bluetooth.startBluetooth(hub, Link, log);
     startUsb(hub, cfg);
     startWifi(hub, cfg);
+    mesh?.start();
     setInterval(() => {
       const upgrade = cfg.usb.pairedDeviceId && cfg.bluetooth.enabled && bluetooth.available() &&
         hub.connectedLinks().some(link => link.kind === 'usb' && link.info.id === cfg.usb.pairedDeviceId && link.info.ble === 1 &&

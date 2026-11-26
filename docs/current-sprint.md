@@ -13,4 +13,11 @@ by host, project, and conversation. The new firmware was flashed and connected
 over USB and Bluetooth. Visual layout and physical controls in this build
 still await manual confirmation.
 
+The multi-host branch adds automatic Tailnet discovery and peer fan-out to the
+daemon. Integration tests cover three daemons with simulated device links.
+Two Macs discovered each other without configured addresses and sent a test
+notification and approval to physical devices over USB and Bluetooth. Approving
+on the USB device cleared the same card on the Bluetooth device, as confirmed
+on its screen.
+
 See [Chinese setup](../README.md), [English setup](../README.en.md), [protocol](protocol.md), and [progress](progress.md).

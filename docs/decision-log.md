@@ -85,3 +85,14 @@ pending card keeps the same timestamp across transport replays. The device
 keeps the latest completion per source host, project, and conversation.
 A session ID distinguishes conversations with the same title. Firmware can
 still display cards from an older daemon that sends no formatted timestamp.
+
+### ADR-0005: Mirror cards directly between selected Tailnet peers
+
+- Date: 2026-11-25
+- Status: Accepted
+
+Every participating computer runs the same daemon and connects directly to its
+peer list, discovered through Tailscale by default. Both peers prove possession
+of the shared key before any card is sent. The source daemon owns the response to its agent. Receivers
+serve cards locally without forwarding them. A separate Tailnet listener keeps
+hook administration and pairing on loopback.

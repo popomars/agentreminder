@@ -82,3 +82,21 @@ ssh -N -o ExitOnForwardFailure=yes -R 127.0.0.1:47331:127.0.0.1:47321 user@remot
 
 远程运行 `node ~/.agentreminder/app/host/agentreminder.js status`，检查是否看到
 本机 USB 设备。SSH 转发步骤仍待真实远程 agent 验证。
+
+## Tailnet peer transport
+
+Each enabled daemon opens a separate IPv4 listener, bound to its configured
+Tailscale IPv4 address. It refreshes candidates from `tailscale status --json`
+every ten seconds, with explicit addresses available as an override. Before a
+card is sent, `POST /v1/peer` authenticates both ends using HMAC proofs bound
+to the two addresses. The receiving daemon gives the sender a single-use
+challenge for its signed `POST /v1/card` body. The key stays local.
+The local hook, pairing, shutdown, and raw endpoints stay on loopback.
+
+The originating daemon sends `{card, timeoutMs}` to each peer. A receiver sends
+the existing card to its local device without forwarding it further. The
+origin assigns the card ID and timestamp once. Approval HTTP requests remain
+open for the local device decision. The origin accepts one valid outcome,
+closes the other requests, and clears its own card. A closed origin connection
+cancels incoming peer cards. Unreachable peers are skipped and events are not
+queued for offline peers.

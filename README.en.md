@@ -81,6 +81,33 @@ For remote agents over SSH, use `--no-pair` on the remote machine and forward th
 
 The [prebuilt images and checksums](firmware/release/waveshare-amoled-2.16) live in the repository. From a clone, use `bash flash.sh --lang en` to verify and flash them, or `bash flash.sh --lang en --check` to verify only. On the first flash, the script may install esptool into a private Python environment. If the board cannot enter flashing mode, hold BOOT while connecting USB and rerun the command.
 
+## Multiple computers and devices
+
+Install the same service from this branch on each computer with `bash install.sh`. Keep the current firmware on paired USB or Bluetooth devices. A computer that only sends events can install with `--no-pair` and start the service separately.
+
+Merge the following into each computer's `~/.agentreminder/config.json`, keeping existing pairing settings. Use the same key on each member. The daemon uses `tailscale status --json` to discover its local address and online peers every 10 seconds. Adding a computer requires no edits on existing members. Allow TCP port `47323` between participants. [Tailscale CLI](https://tailscale.com/docs/reference/tailscale-cli)
+
+```json
+{
+  "tailnet": {
+    "enabled": true,
+    "key": "replace-with-the-same-64-lowercase-hex-characters-on-each-computer"
+  }
+}
+```
+
+Generate one key with `node -p "require('node:crypto').randomBytes(32).toString('hex')"`. Share it privately and set the config file's permissions to `600`. The daemon verifies that a peer holds the key before sending a card. To migrate from manual configuration, remove `listen` and `peers` together, then restart.
+
+Run the following on every computer after configuration. Start the service again after a reboot. When `tailnet.listening` is true, use `node ~/.agentreminder/app/host/agentreminder.js test` on any member to send sample cards.
+
+```bash
+node ~/.agentreminder/app/host/agentreminder.js stop
+node ~/.agentreminder/app/host/agentreminder.js start
+node ~/.agentreminder/app/host/agentreminder.js status
+```
+
+The service sends supported notifications, approvals, and questions to every online member's paired device. The originating computer can have no device. The first valid response to reach it wins, and the remaining cards close. Choosing **Continue on computer** returns control to the original conversation. Events missed while offline are not replayed. Agents still apply their own hook and permission capabilities. Each computer pairs with one board.
+
 ## Uninstall
 
 ```bash

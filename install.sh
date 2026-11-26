@@ -63,7 +63,7 @@ mkdir -p "$install_dir/host/tools" "$install_dir/integrations/dsh"
 stage="$(mktemp -d "$install_dir/.install.XXXXXXXX")"
 trap 'rm -rf "$stage"' EXIT
 source_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-files=(uninstall.sh host/uninstall.js host/agentreminder.js host/bluetooth.js host/codex-approval-proxy.js host/codex-approval-cli host/open-codex.sh host/configure-codex-dock.js
+files=(uninstall.sh host/uninstall.js host/agentreminder.js host/tailnet.js host/bluetooth.js host/codex-approval-proxy.js host/codex-approval-cli host/open-codex.sh host/configure-codex-dock.js
   host/tools/hardware-check.js integrations/dsh/cordis.patch.yml)
 if "$flash"; then
   firmware_dir=firmware/release/waveshare-amoled-2.16
@@ -107,6 +107,7 @@ else
 
 fi
 node --check "$stage/host/agentreminder.js"
+node --check "$stage/host/tailnet.js"
 node --check "$stage/host/uninstall.js"
 node --check "$stage/host/bluetooth.js"
 node --check "$stage/host/codex-approval-proxy.js"
