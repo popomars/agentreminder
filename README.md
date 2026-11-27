@@ -53,7 +53,7 @@ Codex 桌面端移到其他文件夹后，铃铛会从正在运行的应用和 m
 
 | Agent | 安装后要做什么 |
 | --- | --- |
-| Codex CLI | 重开终端会话，输入 `/hooks`，审核并信任 AgentReminder 的 `PermissionRequest` 和 `Stop`。菜单里的「Hooks 已配置」表示配置已写入。 |
+| Codex Hooks | 在桌面端「设置 → Hooks」或 CLI `/hooks` 审核并信任 AgentReminder 的 `PermissionRequest` 和 `Stop`。在 **Agent 接入 → Codex Hooks** 可分别查看两个 hook 的信任状态，也可立即重新检查。 |
 | Codex 桌面端 | 从铃铛选择 **Agent 接入 → Codex 双端审批（桌面端）→ 启用**，再选择「现在重启」或「稍后重开」。需要审批时用手动审批，审核人设为用户。 |
 | Claude Code CLI | 开启新的 `claude` 会话。支持 `AskUserQuestion`，2.1.76 及更新版本还支持 `Elicitation`。 |
 | dsh | 在 profile 中安装 Claude Code hooks 桥接，合并 Cordis 示例，并将 `configPath` 指向 `~/.agentreminder/dsh-hooks.json` 的绝对路径。 [Cordis 配置示例](integrations/dsh/cordis.patch.yml) |
@@ -78,10 +78,10 @@ Codex 桌面端移到其他文件夹后，铃铛会从正在运行的应用和 m
 | **安装或更新固件…** | 选择板型，从安装包写入固件。写入时保持 USB 连接。已经配对的设备重启后会重连。 |
 | **发送测试通知** | 快速验证菜单栏和本机设备是否能收卡。 |
 | **联机服务** | **初始化**生成并复制新组密钥，**加入联机服务**使用现有组密钥，**查看联机密钥**可查看或复制本机已保存的密钥。 |
-| **Agent 接入** | 查看 Codex CLI、Codex 桌面双端审批、Claude Code CLI、dsh 和 WorkBuddy 的状态并分别启停。Codex 桌面设置在重开 ChatGPT 后生效。 |
+| **Agent 接入** | 查看 Codex Hooks 的信任状态，并分别启停 Codex Hooks、Codex 桌面双端审批、Claude Code CLI、dsh 和 WorkBuddy。Codex 桌面设置在重开 ChatGPT 后生效。 |
 | **登录时启动** | 在 macOS「登录项与扩展」中显示为 AgentReminder。它启动铃铛和后台服务，并恢复已启用的 Codex Dock 配置。 |
 | **阻止闲置睡眠** | macOS 后台服务启动时默认开启，让 Mac 在锁屏或熄屏后保持系统唤醒。手动关闭后，下次启动仍保持关闭。 |
-| **检查更新…** | 检查 GitHub `main` 的版本。发现新版后可选择「安装更新」，完成后铃铛自动重开，保留配对、联机设置和 hooks。 |
+| **检查更新…** | 检查 GitHub `main` 的版本。发现新版后可选择「安装更新」，完成后铃铛自动重开，保留配对、联机设置和未变更的 hook。Codex hook 需要审核时会提示。 |
 
 设备一次显示一张审批，默认等待 5 分钟。两个预设选项可以在设备上选择。多选项、文字输入和登录验证可回原对话完成。微雪短按 PWR、Passport 竖放时短按下键，可把问题交回电脑。
 
@@ -101,7 +101,7 @@ Codex 桌面端移到其他文件夹后，铃铛会从正在运行的应用和 m
 
 ## 更新或卸载
 
-- **更新 Mac 应用和 hooks**。可以从铃铛选择「检查更新…」，也可以重新运行安装脚本。升级会保留配对、联机配置和手动保存的休眠选项。手动运行脚本时可加 `--skip-hooks --no-pair` 仅更新应用及主机组件。更新了 hooks 时重开对应的 Agent。用 `--no-autostart` 安装时可跳过注册登录启动。
+- **更新 Mac 应用和 hooks**。可以从铃铛选择「检查更新…」，也可以重新运行安装脚本。升级会保留配对、联机配置和手动保存的休眠选项。手动运行脚本时可加 `--skip-hooks --no-pair` 仅更新应用及主机组件。升级保留未变更 Codex hook 的原条目及信任记录。定义变化时，按提示在「设置 → Hooks」或 `/hooks` 重新审核。其他 Agent 的 hooks 更新后，重开对应的 Agent。用 `--no-autostart` 安装时可跳过注册登录启动。
 - **更新设备固件**。从铃铛选择「安装或更新固件…」。
 - **卸载**。执行 `bash ~/.agentreminder/app/uninstall.sh`，移除应用、主机程序和安装器管理的 hooks，保留配对记录、日志及其他 hooks。
 

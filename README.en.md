@@ -53,7 +53,7 @@ For a relocated Codex Desktop app, the bell looks through running apps and apps 
 
 | Agent | After installation |
 | --- | --- |
-| Codex CLI | Open a new session. Run `/hooks` and review and trust the AgentReminder `PermissionRequest` and `Stop` hooks. The bell shows **Hooks configured** once setup has written them. |
+| Codex Hooks | Review and trust the AgentReminder `PermissionRequest` and `Stop` hooks in desktop **Settings → Hooks** or CLI `/hooks`. Open **Agent integrations → Codex Hooks** in the bell to see each hook’s trust status or refresh it. |
 | Codex Desktop | Choose **Agent integrations → Codex Desktop approvals → Enable** from the bell, then choose **Restart Now** or **Reopen Later**. Use manual approval and set the reviewer to the user. |
 | Claude Code CLI | Start a new `claude` session. AgentReminder supports `AskUserQuestion` and, on version 2.1.76 or later, `Elicitation`. |
 | dsh | Install the Claude Code hooks bridge in your profile, merge the Cordis example, and set `configPath` to the absolute path of `~/.agentreminder/dsh-hooks.json`. [Cordis configuration](integrations/dsh/cordis.patch.yml) |
@@ -78,10 +78,10 @@ For a relocated Codex Desktop app, the bell looks through running apps and apps 
 | **Install or update firmware…** | Installs the bundled firmware for the selected model. Keep USB connected while writing. Paired boards reconnect after restarting. |
 | **Send test notification** | Checks delivery to the menu and local devices. |
 | **Tailnet service** | **Initialize** creates and copies a new group key. **Join Tailnet service** uses an existing group key. **View shared key** displays or copies the saved key. |
-| **Agent integrations** | Shows the status of Codex CLI, Codex Desktop approvals, Claude Code CLI, dsh, and WorkBuddy. Each integration can be enabled or disabled independently. Codex Desktop changes apply after reopening ChatGPT. |
+| **Agent integrations** | Shows Codex hook trust and provides independent controls for Codex Hooks, Codex Desktop approvals, Claude Code CLI, dsh, and WorkBuddy. Codex Desktop changes apply after reopening ChatGPT. |
 | **Launch at login** | Appears as AgentReminder in macOS Login Items & Extensions. It starts the bell and local service, and restores the Codex Dock configuration when enabled. |
 | **Prevent idle sleep** | Defaults to on when the macOS service starts and keeps the system awake while the Mac is locked or the display is off. Turning it off is remembered across restarts. |
-| **Check for updates…** | Checks GitHub `main` for a newer version. Choose **Install update** to install it and reopen the bell while retaining pairings, Tailnet settings, and hooks. |
+| **Check for updates…** | Checks GitHub `main` for a newer version. Choose **Install update** to install it and reopen the bell while retaining pairings, Tailnet settings, and unchanged hooks. The bell prompts when Codex hooks need review. |
 
 The board shows one approval at a time with a five-minute default deadline. For a question with two preset answers, use the indicated buttons. Return to the original conversation for extra choices, text input, or authentication. Press **PWR** briefly on Waveshare or the bottom function button on Passport in portrait orientation to hand a question back.
 
@@ -101,7 +101,7 @@ On Waveshare, the idle screen shows the host, Bluetooth, and USB status. In the 
 
 ## Update or uninstall
 
-- **Update the Mac app and hooks**. Choose **Check for updates…** in the bell or rerun the installer. Updates retain pairings, Tailnet settings, and an explicitly saved sleep preference. Add `--skip-hooks --no-pair` when running the installer to update just the app and host components. Reopen an agent after updating its hooks. Add `--no-autostart` to skip registering launch at login.
+- **Update the Mac app and hooks**. Choose **Check for updates…** in the bell or rerun the installer. Updates retain pairings, Tailnet settings, and an explicitly saved sleep preference. Add `--skip-hooks --no-pair` when running the installer to update just the app and host components. Upgrades keep unchanged Codex hook entries and preserve their trust. When a definition changes, follow the prompt to review it in **Settings → Hooks** or `/hooks`. Reopen other agents after their hooks change. Add `--no-autostart` to skip registering launch at login.
 - **Update board firmware**. Use **Install or update firmware…** from the bell.
 - **Uninstall**. Run `bash ~/.agentreminder/app/uninstall.sh --lang en` to remove the app, host software, and installer-managed hooks while retaining pairings, logs, and unrelated hooks.
 

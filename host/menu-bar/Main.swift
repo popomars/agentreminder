@@ -141,6 +141,18 @@ private struct ReadResult: Decodable { let ok: Bool }
 private struct TestResult: Decodable { let delivered: Int }
 private struct TailnetSetupResult: Decodable { let ok: Bool?; let error: String? }
 private struct CodexDockStatus: Decodable { let dockOverrideActive: Bool }
+
+private enum HookTrust: String, Decodable {
+    case trusted, modified, untrusted, disabled, missing, unavailable
+
+    var needsReview: Bool { self == .modified || self == .untrusted }
+}
+
+private struct CodexHookStatus: Decodable {
+    let source: String?
+    let stop: HookTrust
+    let permissionRequest: HookTrust
+}
 private struct AgentIntegrationResult: Decodable { let status: String; let installedHooks: Bool? }
 private enum AgentIntegration: String, CaseIterable {
     case codex, codexDesktop, claude, dsh, workbuddy
@@ -215,6 +227,11 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var codexDockStatus: CodexDockStatus?
     private var codexStatusCheck: Task<Void, Never>?
     private var codexMenuItem: NSMenuItem?
+    private var codexHookMenuItem: NSMenuItem?
+    private var codexHookStatus: CodexHookStatus?
+    private var codexHookCheck: Task<Void, Never>?
+    private var lastCodexHookCheck = Date.distantPast
+    private var showCodexHookReviewOnInstall = ProcessInfo.processInfo.arguments.contains("--replace-existing")
     private var notificationMenuItem: NSMenuItem?
     private var approvalMenuItem: NSMenuItem?
     private var activeApproval: (id: String, alert: NSAlert)?
@@ -287,7 +304,7 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Task {
             if installation.usesDefaultStateDirectory {
                 do {
-                    let result = try await runCodexSetup("restore", app: installation.codexApp)
+                    let result = try await runCodexCommand("restore", app: installation.codexApp)
                     if result.exitCode != 0 {
                         NSLog("AgentReminder could not restore Codex Dock configuration: %@",
                               String(decoding: result.output, as: UTF8.self))
@@ -348,6 +365,7 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
             defer { refreshing = false }
             do {
                 inbox = try await request("inbox")
+                promptForCodexHookReview()
                 if serviceNeedsStartup || inbox?.canManageIntegrations == nil || inbox?.canInitializeTailnet == nil {
                     startService()
                 }
@@ -488,6 +506,7 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         menu.removeAllItems()
         codexMenuItem = nil
+        codexHookMenuItem = nil
         notificationMenuItem = nil
         approvalMenuItem = nil
         if installingUpdate {
@@ -638,8 +657,8 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 alert.messageText = sameVersionDifferentCommit
                     ? label("GitHub main 有不同提交", "GitHub main has a different revision")
                     : label("发现 AgentReminder \(remoteVersion)", "AgentReminder \(remoteVersion) is available")
-                alert.informativeText = label("安装后铃铛会自动重开。现有配对、联机设置和 hooks 会保留。",
-                                              "The bell reopens automatically after installation. Pairings, Tailnet settings, and hooks are kept.")
+                alert.informativeText = label("安装后铃铛会自动重开，并保留配对、联机设置和未变更的 hooks。",
+                                              "The bell reopens automatically and keeps pairings, Tailnet settings, and unchanged hooks.")
                 alert.addButton(withTitle: label("稍后", "Later"))
                 alert.addButton(withTitle: label("安装更新", "Install update"))
                 alert.addButton(withTitle: label("查看安装说明", "View installation instructions"))
@@ -714,6 +733,9 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
             process.arguments = ["-c", """
                 script=$1
                 shift
+                if grep -Fq -- '--refresh-codex-hooks' "$script"; then
+                    set -- "$@" --refresh-codex-hooks
+                fi
                 /bin/bash "$script" "$@"
                 result=$?
                 if [ "$result" -eq 0 ]; then rm -rf -- "${script%/*}"; fi
@@ -857,7 +879,7 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func integrationTitle(_ agent: AgentIntegration) -> String {
         switch agent {
-        case .codex: return "Codex CLI"
+        case .codex: return "Codex Hooks"
         case .codexDesktop: return label("Codex 双端审批（桌面端）", "Codex Desktop approvals")
         case .claude: return "Claude Code"
         case .dsh: return "dsh"
@@ -896,7 +918,16 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
             let hint: String?
             switch agent {
             case .codex:
-                hint = label("在终端运行 /hooks 审核并信任 AgentReminder", "Review and trust AgentReminder under /hooks in Codex")
+                hint = nil
+                options.addItem(.separator())
+                for tag in 1...3 {
+                    let status = action("", enabled: false)
+                    status.tag = tag
+                    options.addItem(status)
+                }
+                options.addItem(action(label("重新检查信任状态", "Check hook trust"), #selector(checkCodexHooks)))
+                options.addItem(action(label("在 Codex 设置 → Hooks 或 CLI /hooks 审核", "Review in Codex Settings → Hooks or CLI /hooks"),
+                                       enabled: false))
             case .codexDesktop:
                 hint = installation.codexApp == nil
                     ? nil
@@ -913,6 +944,7 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
             updateAgentMenuItem(row, agent: agent)
             agents.addItem(row)
             if agent == .codexDesktop { codexMenuItem = row }
+            if agent == .codex { codexHookMenuItem = row }
         }
         entry.submenu = agents
         menu.addItem(entry)
@@ -930,9 +962,17 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
             state = inbox?.agentIntegrations?[agent.rawValue].flatMap(IntegrationStatus.init(rawValue:)) ?? .unavailable
             ready = inbox?.canManageIntegrations == true && !updatingHookAgents.contains(agent)
         }
-        let status = agent == .codex && state == .enabled
-            ? label("Hooks 已配置", "Hooks configured") : integrationStatusLabel(state)
+        let status = agent == .codex && state == .enabled ? codexHookSummary() : integrationStatusLabel(state)
         row.title = "\(integrationTitle(agent)) · \(status)"
+        if agent == .codex, let options = row.submenu {
+            options.item(withTag: 1)?.title = "Stop · " + hookTrustLabel(codexHookStatus?.stop)
+            options.item(withTag: 2)?.title = "PermissionRequest · " + hookTrustLabel(codexHookStatus?.permissionRequest)
+            let source = codexHookStatus?.source == "desktop"
+                ? label("检查来源 · Codex 桌面端", "Checked by Codex Desktop")
+                : label("检查来源 · Codex CLI", "Checked by Codex CLI")
+            options.item(withTag: 3)?.title = source
+            options.item(withTag: 3)?.isHidden = codexHookStatus?.source == nil
+        }
         for option in row.submenu?.items ?? [] {
             if option.action == #selector(chooseCodexApp) {
                 option.isEnabled = ready
@@ -968,8 +1008,9 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     let detail: String
                     switch agent {
                     case .codex:
-                        detail = label("请重开 Codex，在终端输入 /hooks，审核并信任 AgentReminder 的 PermissionRequest 和 Stop。",
-                                       "Reopen Codex, then review and trust the AgentReminder PermissionRequest and Stop hooks in /hooks.")
+                        detail = label("在 Codex 桌面端「设置 → Hooks」或 CLI /hooks 审核并信任 AgentReminder 的 PermissionRequest 和 Stop。",
+                                       "Review and trust the AgentReminder PermissionRequest and Stop hooks in desktop Settings → Hooks or CLI /hooks.")
+                        refreshCodexHooks(force: true)
                     case .claude:
                         detail = label("Hooks 已写入。请开启新的 Claude Code 会话。", "Hooks are installed. Start a new Claude Code session.")
                     case .dsh:
@@ -995,11 +1036,60 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         if let codexMenuItem { updateAgentMenuItem(codexMenuItem, agent: .codexDesktop) }
     }
 
-    private func runCodexSetup(_ command: String, app: URL? = nil) async throws -> (exitCode: Int32, output: Data) {
+    private func hookTrustLabel(_ trust: HookTrust?) -> String {
+        switch trust {
+        case .trusted: label("已信任", "Trusted")
+        case .modified: label("已变更，需重新信任", "Changed, needs review")
+        case .untrusted: label("待信任", "Needs review")
+        case .disabled: label("已在 Codex 停用", "Disabled in Codex")
+        case .missing: label("待配置", "Not configured")
+        case .unavailable, nil: label("信任状态不可用", "Trust status unavailable")
+        }
+    }
+
+    private func codexHookSummary() -> String {
+        guard let status = codexHookStatus else {
+            return codexHookCheck == nil ? hookTrustLabel(nil) : label("正在检查信任状态", "Checking hook trust")
+        }
+        let states = [status.stop, status.permissionRequest]
+        if states.contains(where: \.needsReview) { return label("需审核信任", "Requires trust review") }
+        if states.allSatisfy({ $0 == .trusted }) { return hookTrustLabel(.trusted) }
+        if states.contains(.disabled) { return hookTrustLabel(.disabled) }
+        return hookTrustLabel(nil)
+    }
+
+    @objc private func checkCodexHooks() { refreshCodexHooks(force: true) }
+
+    private func refreshCodexHooks(force: Bool = false) {
+        guard codexHookCheck == nil, force || Date().timeIntervalSince(lastCodexHookCheck) >= 3 else { return }
+        lastCodexHookCheck = Date()
+        let app = installation.codexApp
+        codexHookCheck = Task {
+            if let result = try? await runCodexCommand("codex-hook-status", app: app, script: installation.host),
+               result.exitCode == 0 {
+                codexHookStatus = try? JSONDecoder().decode(CodexHookStatus.self, from: result.output)
+            } else { codexHookStatus = nil }
+            codexHookCheck = nil
+            promptForCodexHookReview()
+            if let row = codexHookMenuItem { updateAgentMenuItem(row, agent: .codex) }
+        }
+        if let row = codexHookMenuItem { updateAgentMenuItem(row, agent: .codex) }
+    }
+
+    private func promptForCodexHookReview() {
+        guard showCodexHookReviewOnInstall, inbox?.agentIntegrations?["codex"] == "enabled",
+              let status = codexHookStatus, status.stop.needsReview || status.permissionRequest.needsReview else { return }
+        showCodexHookReviewOnInstall = false
+        showAlert(label("Codex Hooks 需要审核信任", "Codex hooks require trust review"),
+                  label("在 Codex 桌面端「设置 → Hooks」或 CLI /hooks 审核待信任的 AgentReminder hooks。",
+                        "Review the AgentReminder hooks marked for review in desktop Settings → Hooks or CLI /hooks."))
+    }
+
+    private func runCodexCommand(_ command: String, app: URL? = nil, script: URL? = nil) async throws -> (exitCode: Int32, output: Data) {
         try await withCheckedThrowingContinuation { continuation in
             let process = Process()
             process.executableURL = URL(fileURLWithPath: installation.node)
-            process.arguments = [installation.codexSetup.path, command]
+            process.arguments = [(script ?? installation.codexSetup).path, command]
             var environment = installation.processEnvironment
             if let app { environment["AGENTREMINDER_CODEX_APP"] = app.path }
             process.environment = environment
@@ -1021,11 +1111,12 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     private func readCodexStatus(app: URL?) async -> CodexDockStatus? {
-        guard let result = try? await runCodexSetup("status", app: app), result.exitCode == 0 else { return nil }
+        guard let result = try? await runCodexCommand("status", app: app), result.exitCode == 0 else { return nil }
         return try? JSONDecoder().decode(CodexDockStatus.self, from: result.output)
     }
 
     private func refreshCodexStatus() {
+        refreshCodexHooks()
         guard !configuringCodex else { return }
         let app = installation.codexApp
         codexStatusCheck?.cancel()
@@ -1065,7 +1156,7 @@ private final class MenuBar: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Task {
             defer { configuringCodex = false; updateCodexMenuState() }
             do {
-                let result = try await runCodexSetup(command, app: app)
+                let result = try await runCodexCommand(command, app: app)
                 codexDockStatus = await readCodexStatus(app: app)
                 updateCodexMenuState()
                 guard result.exitCode == 0 else {

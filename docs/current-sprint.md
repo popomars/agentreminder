@@ -166,3 +166,11 @@ testing. On the Waveshare board, the listener confirmed the Passport-style
 idle layout and physical paging and clearing. After a single touchscreen tap
 to mute, a device reboot preserved the setting. Two test notifications and
 one approval rendered without an audible cue.
+
+The Codex Hooks menu reports the desktop or CLI trust status for Stop and
+PermissionRequest. Unchanged upgrades retain their original entries and
+trust. A test with an isolated Codex configuration confirmed that changing
+the approval timeout marks only PermissionRequest for review. A local upgrade
+preserved both trusted hooks. On November 26, a real Codex completion at 21:21
+reached the other Mac's menu bar and its Bluetooth-connected AI Passport
+over Tailnet.

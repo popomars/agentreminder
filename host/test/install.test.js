@@ -576,3 +576,43 @@ printf "%s\\n" "$@" > "$FLASH_MARKER"
   assert.equal((await fromHost('/inbox').then(r => r.json())).notifications[0].title, 'Keep this notification');
   assert.equal(fs.readFileSync(path.join(state, 'firmware-update.pid'), 'utf8'), '');
 });
+
+test('Codex upgrade preserves unchanged hook definitions and their positions', async t => {
+  const { home, codex, state, env } = fixture(t);
+  const args = ['install.sh', '--no-menu-bar', '--no-pair', '--lang', 'en'];
+  const install = (...extra) => run('bash', [...args, ...extra], { cwd: root, env });
+  const file = path.join(codex, 'hooks.json');
+  const config = path.join(state, 'config.json');
+
+  await install('--skip-hooks', '--refresh-codex-hooks');
+  assert(!fs.existsSync(file));
+  assert.match((await install('--agent', 'codex')).stdout, /configured or changed.*Stop.*PermissionRequest/);
+  const original = JSON.parse(fs.readFileSync(file));
+  const unrelated = { type: 'command', command: 'echo keep' };
+  original.hooks.Stop[0].hooks.push(unrelated);
+  original.hooks.PermissionRequest.unshift({ matcher: 'Bash', hooks: [unrelated] });
+  const originalText = JSON.stringify(original);
+  fs.writeFileSync(file, originalText);
+  const originalInode = fs.statSync(file).ino;
+  const trustFile = path.join(codex, 'config.toml');
+  const trustText = '# Local trust state belongs to Codex\n';
+  fs.writeFileSync(trustFile, trustText);
+
+  const pathPrefix = path.join(home, 'replacement-bin');
+  fs.mkdirSync(pathPrefix);
+  fs.symlinkSync(process.execPath, path.join(pathPrefix, 'node'));
+  env.PATH = pathPrefix + path.delimiter + env.PATH;
+  assert.match((await install('--agent', 'codex')).stdout, /unchanged/);
+  assert.equal(fs.readFileSync(file, 'utf8'), originalText);
+  assert.equal(fs.statSync(file).ino, originalInode);
+  assert(!fs.existsSync(file + '.bak'));
+
+  fs.writeFileSync(config, JSON.stringify({ approvalTimeoutSec: 600 }));
+  const { stdout } = await install('--skip-hooks', '--refresh-codex-hooks');
+  assert.match(stdout, /changed \(PermissionRequest\).*review and trust/);
+  const current = JSON.parse(fs.readFileSync(file));
+  assert.deepEqual(current.hooks.Stop, original.hooks.Stop);
+  assert.deepEqual(current.hooks.PermissionRequest[0], original.hooks.PermissionRequest[0]);
+  assert.equal(current.hooks.PermissionRequest[1].hooks[0].timeout, 630);
+  assert.equal(fs.readFileSync(trustFile, 'utf8'), trustText);
+});

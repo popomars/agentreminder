@@ -211,3 +211,14 @@ appears. The existing AgentReminder daemon reads that event from the live
 spool or daily audit file and sends a notification. It deduplicates both
 sources and omits shell commands and arguments. The user makes the approval
 decision in WorkBuddy. One menu switch controls both WorkBuddy paths.
+
+### ADR-0012: Preserve Codex hook positions and report trust from Codex
+
+- Date: 2026-11-26
+- Status: Accepted
+
+The menu asks Codex App Server for the managed Stop and PermissionRequest
+hooks' trust. Hook entries retain their order and definitions across routine
+upgrades. An update checks previously configured Codex hooks and prompts
+for review when Codex reports a new or changed definition. Codex stores the
+review decision.
