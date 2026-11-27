@@ -54,7 +54,7 @@ function writeHooks({ target, mode, settings, removed }) {
 
 const installedFiles = [
   'host/agentreminder.js', 'host/tailnet.js', 'host/workbuddy.js', 'host/bluetooth.js', 'host/bluetooth/agentreminder-bluetooth',
-  'host/codex-approval-proxy.js', 'host/codex-approval-cli', 'host/open-codex.sh', 'host/configure-codex-dock.js',
+  'host/codex-hooks.js', 'host/codex-approval-proxy.js', 'host/codex-approval-cli', 'host/open-codex.sh', 'host/configure-codex-dock.js',
   'host/tools/hardware-check.js', 'integrations/dsh/cordis.patch.yml', 'flash.sh',
   ...['bootloader.bin', 'partitions.bin', 'boot_app0.bin', 'firmware.bin', 'SHA256SUMS']
     .map(file => `firmware/release/waveshare-amoled-2.16/${file}`),

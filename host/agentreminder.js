@@ -25,8 +25,10 @@ const { spawn, execFileSync } = require('child_process');
 const bluetooth = require('./bluetooth');
 const tailnet = require('./tailnet');
 const workbuddy = require('./workbuddy');
+const codexHooks = require('./codex-hooks');
+const { isDeepStrictEqual } = require('node:util');
 
-const VERSION = '0.5.13';
+const VERSION = '0.5.14';
 const UNKNOWN_CONVERSATION = '未命名对话';
 const HOME_DIR = process.env.AGENTREMINDER_HOME || path.join(os.homedir(), '.agentreminder');
 const CONFIG_PATH = path.join(HOME_DIR, 'config.json');
@@ -1208,10 +1210,16 @@ function integrationAllowed(config, agent) {
   return !INTEGRATION_AGENTS.includes(agent) || config.agentIntegrations?.[agent] !== false;
 }
 
+function readHookSettings(file) {
+  let settings;
+  try { settings = JSON.parse(fs.readFileSync(file, 'utf8')); }
+  catch (error) { if (error.code === 'ENOENT') return {}; throw error; }
+  if (!settings || typeof settings !== 'object' || Array.isArray(settings)) throw new Error('Invalid settings: ' + file);
+  return settings;
+}
+
 function mergeHooks(file, hooks, agent) {
-  let cur = {};
-  if (fs.existsSync(file)) cur = JSON.parse(fs.readFileSync(file, 'utf8'));
-  if (!cur || typeof cur !== 'object' || Array.isArray(cur)) throw new Error('Invalid settings: ' + file);
+  const cur = readHookSettings(file);
   cur.hooks = cur.hooks || {};
   for (const [ev, groups] of Object.entries(hooks)) {
     const newCommands = new Set(groups.flatMap(group => group.hooks.map(hook => hook.command)).filter(command => typeof command === 'string'));
@@ -1251,6 +1259,76 @@ const managedCommand = /^'(?:[^']|'\\'')+' '(?:[^']|'\\'')*\/host\/agentreminder
 
 function managedHookAgent(hook) {
   return hook?.type === 'command' && typeof hook.command === 'string' ? hook.command.match(managedCommand)?.[1] : undefined;
+}
+
+const codexEvents = { Stop: 'stop', PermissionRequest: 'permission' };
+
+function codexHookPositions(settings) {
+  return Object.fromEntries(Object.entries(codexEvents).map(([event, kind]) => {
+    const groups = settings.hooks?.[event] || [];
+    const indices = groups.flatMap((group, i) => Array.isArray(group?.hooks)
+      ? group.hooks.flatMap((hook, j) => managedHookAgent(hook) === 'codex' ? [`${i}:${j}`] : []) : []);
+    return [kind === 'permission' ? 'permissionRequest' : kind, indices];
+  }));
+}
+
+function installCodexHooks(file, approvalTimeout, existingOnly) {
+  const previous = readHookSettings(file);
+  if (existingOnly && !Object.values(codexHookPositions(previous)).some(indices => indices.length)) return null;
+  const hooks = { ...previous.hooks };
+  const runningNode = codexHooks.realPath(process.execPath);
+  const stableNode = codexHooks.findExecutable('node', candidate => codexHooks.realPath(candidate) === runningNode)
+    || process.execPath;
+  const changed = [];
+
+  for (const [event, kind] of Object.entries(codexEvents)) {
+    const timeout = event === 'Stop' ? 10 : approvalTimeout;
+    const suffix = ` ${shellQuote(__filename)} hook --agent codex --event ${kind}`;
+    const desired = { type: 'command', command: shellQuote(stableNode) + suffix, timeout };
+    const before = hooks[event] || [];
+    let retained = false;
+    const after = before.flatMap(group => {
+      if (!Array.isArray(group?.hooks)) return [group];
+      const unfiltered = group.matcher == null || group.matcher === '' || group.matcher === '*';
+      const rules = group.hooks.flatMap(hook => {
+        if (managedHookAgent(hook) !== 'codex') return [hook];
+        if (retained || !unfiltered) return [];
+        retained = true;
+        // A legacy absolute Node path can remain trusted while it resolves to this runtime.
+        const interpreter = hook.command.endsWith(suffix)
+          ? hook.command.slice(0, -suffix.length).slice(1, -1).replaceAll("'\\''", "'") : '';
+        const sameCommand = path.isAbsolute(interpreter) && codexHooks.realPath(interpreter) === runningNode;
+        return [sameCommand && hook.timeout === timeout ? hook : { ...hook, ...desired }];
+      });
+      if (rules.length === group.hooks.length && rules.every((rule, i) => rule === group.hooks[i])) return [group];
+      return rules.length ? [{ ...group, hooks: rules }] : [];
+    });
+    if (!retained) after.push({ hooks: [desired] });
+    if (!isDeepStrictEqual(before, after)) {
+      hooks[event] = after;
+      changed.push(event);
+    }
+  }
+  if (changed.length) {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    if (fs.existsSync(file)) fs.copyFileSync(file, file + '.bak');
+    writePrivateFile(codexHooks.realPath(file), JSON.stringify({ ...previous, hooks }, null, 2) + '\n');
+  }
+  return changed;
+}
+
+function reportCodexInstall(changed, report) {
+  if (!changed) return;
+  const english = process.env.AGENTREMINDER_LANG === 'en';
+  if (!changed.length) {
+    report(english ? 'Codex hooks are unchanged. Existing trust settings are preserved.'
+      : 'Codex hooks 定义未变，保留现有信任。');
+    return;
+  }
+  const events = changed.join(', ');
+  report(english
+    ? `Codex hooks configured or changed (${events}). In desktop Settings → Hooks or CLI /hooks, review and trust the AgentReminder PermissionRequest and Stop hooks marked for review.`
+    : `Codex hooks 已配置或变更（${events}）。请在桌面端「设置 → Hooks」或 CLI /hooks 审核并信任待审核的 AgentReminder hooks。`);
 }
 
 function integrationHasHooks(agent) {
@@ -1298,11 +1376,7 @@ function install(target, report = console.log, claudeExecutable) {
   const t = (cfg) => ({ type: 'command', command: cfg.cmd, timeout: cfg.timeout });
   const appr = loadConfig().approvalTimeoutSec + 30;
   if (target === 'codex') {
-    const f = mergeHooks(hookSettings.codex, {
-      PermissionRequest: [{ hooks: [t({ cmd: hookCmd('codex', 'permission'), timeout: appr })] }],
-      Stop: [{ hooks: [t({ cmd: hookCmd('codex', 'stop'), timeout: 10 })] }],
-    }, target);
-    report(`已写入 ${f}\n在 Codex 里运行 /hooks 审核并信任这些 hook。`);
+    reportCodexInstall(installCodexHooks(hookSettings.codex, appr, false), report);
   } else if (target === 'dsh') {
     const f = mergeHooks(hookSettings.dsh, {
       PreToolUse: [{ matcher: loadConfig().dshMatcher || 'bash|shell|write|edit|apply_patch|Bash|Shell|Write|Edit|MultiEdit',
@@ -1382,6 +1456,14 @@ async function main() {
       console.log(r.delivered ? '已发送 Wi-Fi 配置，设备会自动重连。' : '没有连接的设备，请先插上 USB。');
       return;
     }
+    case 'codex-hook-status': {
+      const file = hookSettings.codex;
+      const positions = codexHookPositions(readHookSettings(file));
+      console.log(JSON.stringify(await codexHooks.trustStatus(file, positions, process.env.AGENTREMINDER_CODEX_APP)));
+      return;
+    }
+    case 'refresh-codex-hooks':
+      return reportCodexInstall(installCodexHooks(hookSettings.codex, loadConfig().approvalTimeoutSec + 30, true), console.log);
     case 'install': {
       const agent = rest[0];
       const claudeExecutable = agent === 'claude' ? claudeExecutableOnPath() : undefined;

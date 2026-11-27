@@ -10,6 +10,7 @@ pair=true
 menu_bar=false
 if [[ "$platform" == Darwin ]]; then menu_bar=true; fi
 install_hooks=true
+refresh_codex_hooks=false
 init_tailnet=false
 autostart=true
 flash=false
@@ -21,8 +22,8 @@ agents=()
 auto_workbuddy=false
 say() { if [[ "$lang" == en ]]; then printf '%s\n' "$2"; else printf '%s\n' "$1"; fi; }
 usage() {
-  say '用法：bash install.sh [--agent codex|claude|dsh|workbuddy] [--ref REF] [--flash [--board waveshare-amoled-2.16|folotoy-passport] [--port DEVICE] [--baud RATE]] [--menu-bar|--no-menu-bar] [--skip-hooks] [--no-pair] [--init-tailnet] [--no-autostart] [--lang zh|en]' \
-      'Usage: bash install.sh [--agent codex|claude|dsh|workbuddy] [--ref REF] [--flash [--board waveshare-amoled-2.16|folotoy-passport] [--port DEVICE] [--baud RATE]] [--menu-bar|--no-menu-bar] [--skip-hooks] [--no-pair] [--init-tailnet] [--no-autostart] [--lang zh|en]'
+  say '用法：bash install.sh [--agent codex|claude|dsh|workbuddy] [--ref REF] [--flash [--board waveshare-amoled-2.16|folotoy-passport] [--port DEVICE] [--baud RATE]] [--menu-bar|--no-menu-bar] [--skip-hooks] [--refresh-codex-hooks] [--no-pair] [--init-tailnet] [--no-autostart] [--lang zh|en]' \
+      'Usage: bash install.sh [--agent codex|claude|dsh|workbuddy] [--ref REF] [--flash [--board waveshare-amoled-2.16|folotoy-passport] [--port DEVICE] [--baud RATE]] [--menu-bar|--no-menu-bar] [--skip-hooks] [--refresh-codex-hooks] [--no-pair] [--init-tailnet] [--no-autostart] [--lang zh|en]'
 }
 while (( $# )); do
   case "$1" in
@@ -43,6 +44,7 @@ while (( $# )); do
     --menu-bar) menu_bar=true; shift;;
     --no-menu-bar) menu_bar=false; shift;;
     --skip-hooks) install_hooks=false; shift;;
+    --refresh-codex-hooks) refresh_codex_hooks=true; shift;;
     --no-pair) pair=false; shift;;
     --init-tailnet) init_tailnet=true; shift;;
     --no-autostart) autostart=false; shift;;
@@ -158,7 +160,7 @@ else
   done
 fi
 # Fetch runtime modules only when the selected revision uses them.
-for module in tailnet workbuddy; do
+for module in tailnet workbuddy codex-hooks; do
   if grep -Fq "require('./$module')" "$stage/host/agentreminder.js"; then
     file="host/$module.js"
     if [[ -n ${sha:-} ]]; then
@@ -285,8 +287,19 @@ run_host() {
   fi
 }
 
+supports_codex_hook_status=false
+if grep -Fq "case 'codex-hook-status':" "$host"; then supports_codex_hook_status=true; fi
 if "$install_hooks"; then
-  for agent in "${agents[@]}"; do run_host install "$agent"; done
+  for agent in "${agents[@]}"; do
+    if [[ "$agent" == codex ]] && "$supports_codex_hook_status"; then
+      AGENTREMINDER_LANG="$lang" node "$host" install codex
+    else
+      run_host install "$agent"
+    fi
+  done
+fi
+if "$refresh_codex_hooks" && "$supports_codex_hook_status"; then
+  AGENTREMINDER_LANG="$lang" node "$host" refresh-codex-hooks
 fi
 if "$pair" && ! "$menu_bar"; then
   run_host setup-usb
@@ -338,12 +351,14 @@ if "$install_hooks"; then
       say "dsh 需安装 Claude Code hooks 桥接，并将示例合并到所用 profile：$install_dir/integrations/dsh/cordis.patch.yml" \
           "For dsh, install the Claude Code hooks bridge and merge this example into your profile: $install_dir/integrations/dsh/cordis.patch.yml"
     elif [[ "$agent" == codex ]]; then
-      if ! codex --version >/dev/null 2>&1; then
+      if command -v codex >/dev/null && ! codex --version >/dev/null 2>&1; then
         say '已写入 Codex hooks，但终端中的 codex 无法启动。请确认 codex --version 可运行。' \
             'Codex hooks are installed, but the terminal command could not start. Check that codex --version works.' >&2
       fi
-      say '在 Codex CLI 重新打开会话，输入 /hooks，审核并信任 AgentReminder 的 PermissionRequest 和 Stop。' \
-          'Open a new Codex CLI session. In /hooks, review and trust the AgentReminder PermissionRequest and Stop hooks.'
+      if ! "$supports_codex_hook_status"; then
+        say '在 Codex CLI 重新打开会话，输入 /hooks，审核并信任 AgentReminder 的 PermissionRequest 和 Stop。' \
+            'Open a new Codex CLI session. In /hooks, review and trust the AgentReminder PermissionRequest and Stop hooks.'
+      fi
     elif [[ "$agent" == claude ]]; then
       say 'Claude Code hooks 已配置。重新打开 Claude Code 会话即可使用。' \
           'Claude Code hooks are installed. Open a new Claude Code session to use them.'
